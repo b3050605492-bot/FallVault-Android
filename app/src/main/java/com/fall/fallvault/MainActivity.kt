@@ -3,6 +3,7 @@ package com.fall.fallvault
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -226,24 +227,33 @@ class MainActivity : AppCompatActivity() {
 
 
     // ==================== 系统生物识别（指纹 / 机型支持时的人脸） ====================
-    private fun biometricStatus(): Int =
-        BiometricManager.from(this).canAuthenticate(
+    // 认证器组合：BIOMETRIC_WEAK + DEVICE_CREDENTIAL 需要 Android 11(API 30) 起才支持，
+    // 低版本只用 BIOMETRIC_WEAK（否则 canAuthenticate 直接返回错误 → 开关打不开）
+    private fun authenticators(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             BiometricManager.Authenticators.BIOMETRIC_WEAK or
             BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        )
-
-    /** 可用性检查 → 回调 window.__fvFaceIdResult（与 iOS 的 faceIdCheck 约定一致） */
-    private fun biometricCheck() {
-        val reason = when (biometricStatus()) {
-            BiometricManager.BIOMETRIC_SUCCESS -> null
-            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> "no-enroll"
-            else -> "no-biometry"
-        }
-        if (reason == null) {
-            evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:true}); }catch(e){}")
         } else {
-            evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'" + reason + "'}); }catch(e){}")
+            BiometricManager.Authenticators.BIOMETRIC_WEAK
         }
+
+    private fun biometricStatus(): Int =
+        BiometricManager.from(this).canAuthenticate(authenticators())
+
+    /**
+     * 可用性检查 → 回调 window.__fvFaceIdCheck({ok, enrolled})
+     * 注意回调名是 __fvFaceIdCheck（开启开关用），不是 __fvFaceIdResult（认证结果用）——
+     * 用错回调名会让设置里的开关永远打不开。格式与 iOS 侧保持一致。
+     */
+    private fun biometricCheck() {
+        val status = biometricStatus()
+        val ok = status == BiometricManager.BIOMETRIC_SUCCESS
+        // enrolled：只有「设备支持但还没录入」才是 false，其它情况按可用处理（与 iOS 同逻辑）
+        val enrolled = if (ok) true else (status != BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED)
+        evalJs(
+            "try{ window.__fvFaceIdCheck && window.__fvFaceIdCheck({ok:" + ok +
+            ",enrolled:" + enrolled + "}); }catch(e){}"
+        )
     }
 
     /** 弹系统验证 → 成功/失败都回调 __fvFaceIdResult */
@@ -283,10 +293,7 @@ class MainActivity : AppCompatActivity() {
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle("解锁 FallVault")
                 .setSubtitle("验证身份以解锁密码库")
-                .setAllowedAuthenticators(
-                    BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
-                )
+                .setAllowedAuthenticators(authenticators())
                 .build()
             try {
                 BiometricPrompt(this, executor, callback).authenticate(info)
