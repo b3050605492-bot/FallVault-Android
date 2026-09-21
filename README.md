@@ -48,6 +48,8 @@
 - **恢复是「合并」不是「覆盖」**：重复条目自动跳过，连续恢复多份备份是累加关系
 - 银行卡等 iOS 专属数据会随备份完整往返，不会因为某一端没有对应界面而丢失
 
+> **直接下载**：[FallVault.apk（最新版）](https://github.com/b3050605492-bot/FallVault-Android/releases/latest) —— 全部版本见 [Releases](https://github.com/b3050605492-bot/FallVault-Android/releases)
+
 ## 安装
 
 1. 下载构建产物 `FallVault.apk`
