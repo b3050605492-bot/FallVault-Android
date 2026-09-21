@@ -65,4 +65,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.webkit:webkit:1.11.0")
+    implementation("androidx.biometric:biometric:1.1.0")   // 系统生物识别（指纹 / 机型支持时的人脸）
 }

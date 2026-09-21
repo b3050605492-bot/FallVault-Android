@@ -17,6 +17,9 @@ import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -35,7 +38,7 @@ import java.io.File
  *   vaultSave / vaultLoad  —— 本地数据持久化（filesDir/fvdata.json）
  *   saveFile / pickFile    —— 导出 / 导入备份（系统文件选择器 SAF）
  *   openExternal           —— 用系统浏览器打开网址
- *   （faceIdAuth / faceIdCheck 本版不实现：前端检测不到桥会自动跳过人脸相关流程）
+ *   faceIdAuth / faceIdCheck —— 系统生物识别（指纹；机型支持人脸时同一接口即可走人脸）
  */
 class MainActivity : AppCompatActivity() {
 
@@ -177,7 +180,7 @@ class MainActivity : AppCompatActivity() {
         (function(){
           if (window.__fvShimInstalled) return;
           window.__fvShimInstalled = true;
-          window.__FV_NO_FACE = true;   // 本版不含人脸验证：前端据此隐藏相关入口
+          window.__FV_BIOMETRIC = true;   // 安卓走系统生物识别：前端文案显示「生物识别」而不是 Face ID
           function call(name, arg){
             try {
               if (name === 'vaultLoad' || name === 'pickFile') { window.FallVaultNative[name](''); }
@@ -185,7 +188,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e) { console.error('bridge ' + name + ' failed', e); }
           }
           var handlers = {};
-          ['vaultSave','vaultLoad','saveFile','pickFile','openExternal'].forEach(function(n){
+          ['vaultSave','vaultLoad','saveFile','pickFile','openExternal','faceIdAuth','faceIdCheck'].forEach(function(n){
             handlers[n] = { postMessage: function(arg){ call(n, arg); } };
           });
           window.webkit = window.webkit || {};
@@ -219,6 +222,78 @@ class MainActivity : AppCompatActivity() {
         }
         sb.append("\"")
         return sb.toString()
+    }
+
+
+    // ==================== 系统生物识别（指纹 / 机型支持时的人脸） ====================
+    private fun biometricStatus(): Int =
+        BiometricManager.from(this).canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_WEAK or
+            BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        )
+
+    /** 可用性检查 → 回调 window.__fvFaceIdResult（与 iOS 的 faceIdCheck 约定一致） */
+    private fun biometricCheck() {
+        val reason = when (biometricStatus()) {
+            BiometricManager.BIOMETRIC_SUCCESS -> null
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> "no-enroll"
+            else -> "no-biometry"
+        }
+        if (reason == null) {
+            evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:true}); }catch(e){}")
+        } else {
+            evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'" + reason + "'}); }catch(e){}")
+        }
+    }
+
+    /** 弹系统验证 → 成功/失败都回调 __fvFaceIdResult */
+    private fun biometricAuth() {
+        when (biometricStatus()) {
+            BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED -> {
+                evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'no-enroll'}); }catch(e){}")
+                return
+            }
+            BiometricManager.BIOMETRIC_SUCCESS -> { }
+            else -> {
+                evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'no-biometry'}); }catch(e){}")
+                return
+            }
+        }
+        runOnUiThread {
+            val executor = ContextCompat.getMainExecutor(this)
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:true}); }catch(e){}")
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    val reason = when (errorCode) {
+                        BiometricPrompt.ERROR_NEGATIVE_BUTTON,
+                        BiometricPrompt.ERROR_USER_CANCELED,
+                        BiometricPrompt.ERROR_CANCELED -> "cancel"
+                        else -> "fail"
+                    }
+                    evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'" + reason + "'}); }catch(e){}")
+                }
+
+                override fun onAuthenticationFailed() {
+                    // 单次不匹配不结束会话，等系统继续尝试（与 iOS 行为一致）
+                }
+            }
+            val info = BiometricPrompt.PromptInfo.Builder()
+                .setTitle("解锁 FallVault")
+                .setSubtitle("验证身份以解锁密码库")
+                .setAllowedAuthenticators(
+                    BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                    BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                )
+                .build()
+            try {
+                BiometricPrompt(this, executor, callback).authenticate(info)
+            } catch (e: Exception) {
+                evalJs("try{ window.__fvFaceIdResult && window.__fvFaceIdResult({ok:false,reason:'no-biometry'}); }catch(e){}")
+            }
+        }
     }
 
     // ==================== 原生桥（供 window.webkit shim 调用） ====================
@@ -288,6 +363,18 @@ class MainActivity : AppCompatActivity() {
                     toast("无法打开文件选择窗口")
                 }
             }
+        }
+
+        /** 生物识别可用性检查（等价 iOS 的 faceIdCheck） */
+        @JavascriptInterface
+        fun faceIdCheck(@Suppress("UNUSED_PARAMETER") unused: String) {
+            biometricCheck()
+        }
+
+        /** 弹系统生物识别验证（等价 iOS 的 faceIdAuth） */
+        @JavascriptInterface
+        fun faceIdAuth(@Suppress("UNUSED_PARAMETER") unused: String) {
+            biometricAuth()
         }
 
         /** 用系统浏览器打开链接（等价 iOS 的 openExternal） */

@@ -199,7 +199,7 @@ function lockInit(autoFace) {
   wrap.classList.remove('err', 'ok', 'locked');
   msg.classList.remove('show');
   faceBox.classList.remove('show-actions');
-  label.textContent = 'Face ID 解锁';
+  label.textContent = FACE_NAME + ' 解锁';
   inp.value = ''; inp.type = 'password'; inp.disabled = false;
   document.getElementById('pwEye').innerHTML = (typeof EYE !== 'undefined') ? EYE : '';
 
@@ -277,9 +277,9 @@ function toggleNewFace(btn) {
         fvFace = true; saveDemo(); updateFaceRow();
         showToast('Face ID 解锁已开启');
       } else if (r && !r.enrolled) {
-        showToast('请先在系统设置里录入面容 ID', 3200);
+        showToast(FACE_ENROLL_TIP, 3200);
       } else {
-        showToast('此设备不支持面容 / 指纹', 3200);
+        showToast(FACE_UNSUPPORTED, 3200);
       }
     };
     try { window.webkit.messageHandlers.faceIdCheck.postMessage(null); } catch (e) {}
@@ -307,9 +307,9 @@ function toggleFaceId() {
         updateFaceRow();
         showToast('Face ID 解锁已开启');
       } else if (r && !r.enrolled) {
-        showToast('请先在系统设置里录入面容 ID', 3200);
+        showToast(FACE_ENROLL_TIP, 3200);
       } else {
-        showToast('此设备不支持面容 / 指纹', 3200);
+        showToast(FACE_UNSUPPORTED, 3200);
       }
     };
     try { window.webkit.messageHandlers.faceIdCheck.postMessage(null); } catch (e) {}
@@ -595,7 +595,7 @@ async function faceScanReal() {
   lock.classList.add('scanning');
   label.textContent = '正在识别…';
   const ok = await faceLoadModels();
-  if (!ok) { lock.classList.remove('scanning'); label.textContent = 'Face ID 解锁'; return; }
+  if (!ok) { lock.classList.remove('scanning'); label.textContent = FACE_NAME + ' 解锁'; return; }
   const camOk = await faceOpenCam(document.getElementById('faceVideo'));
   if (!camOk) {
     // 摄像头不可用 → 演示动画
@@ -672,6 +672,11 @@ function faceScanDemo() {
 }
 
 // 打开时的自动识别：已录入人脸 → 真实扫脸；未录入 → 演示动画
+// 生物识别名称：iOS 走系统 Face ID；安卓走系统生物识别（指纹，机型支持时人脸）
+// 壳注入 window.__FV_BIOMETRIC 即为安卓，其余端保持 Face ID 文案
+var FACE_NAME = (window.__FV_BIOMETRIC ? '生物识别' : 'Face ID');
+var FACE_ENROLL_TIP = (window.__FV_BIOMETRIC ? '请先在系统设置里录入指纹或人脸' : '请先在系统设置里录入面容 ID');
+var FACE_UNSUPPORTED = (window.__FV_BIOMETRIC ? '设备不支持生物识别' : '设备不支持面容');
 // ===== 系统 Face ID（iOS 壳：LocalAuthentication，比 face-api 快得多、更准）=====
 function hasNativeFaceId() {
   try { return !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.faceIdAuth); } catch (e) { return false; }
@@ -693,18 +698,18 @@ window.__fvFaceIdResult = function (r) {
   const reason = r ? r.reason : 'fail';
   if (reason === 'cancel') {
     // 用户主动取消系统弹窗 → 安静回到可点状态
-    document.getElementById('faceLabel').textContent = 'Face ID 解锁';
+    document.getElementById('faceLabel').textContent = FACE_NAME + '解锁';
     document.getElementById('faceBox').classList.remove('show-actions');
     return;
   }
   if (reason === 'no-enroll') {
-    document.getElementById('faceLabel').textContent = '未录入面容 ID';
-    showToast('请先在系统设置里录入面容 ID', 3000);
+    document.getElementById('faceLabel').textContent = '未录入' + FACE_NAME;
+    showToast(FACE_ENROLL_TIP, 3000);
     document.getElementById('faceBox').classList.add('show-actions');
     return;
   }
   if (reason === 'no-biometry') {
-    document.getElementById('faceLabel').textContent = '设备不支持面容';
+    document.getElementById('faceLabel').textContent = FACE_UNSUPPORTED;
     showToast('此设备不支持面容 / 指纹', 3000);
     document.getElementById('faceBox').classList.add('show-actions');
     return;
@@ -723,8 +728,8 @@ function nativeFaceAuth() {
   window.__fvFaceTimeout && clearTimeout(window.__fvFaceTimeout);
   window.__fvFaceTimeout = setTimeout(() => {   // 兜底：系统无响应/无面容时不卡死锁屏
     lock.classList.remove('scanning', 'success', 'fail');
-    document.getElementById('faceLabel').textContent = 'Face ID 解锁';
-    showToast('面容不可用，请用主密码', 2600);
+    document.getElementById('faceLabel').textContent = FACE_NAME + '解锁';
+    showToast(FACE_NAME + '不可用，请用主密码', 2600);
     window.__fvFaceTimeout = null;
   }, 3500);
   try { window.webkit.messageHandlers.faceIdAuth.postMessage(null); }
@@ -744,7 +749,7 @@ function faceIdTry() {
   if (!lock || lock.classList.contains('hide')) return;
   document.getElementById('faceBox').classList.remove('show-actions');
   lock.classList.remove('fail', 'success');
-  document.getElementById('faceLabel').textContent = 'Face ID 解锁';
+  document.getElementById('faceLabel').textContent = FACE_NAME + '解锁';
   if (hasNativeFaceId()) { nativeFaceAuth(); return; }   // iOS 壳 → 系统 Face ID
   if (faceDescStore) { faceScanReal(); return; }   // 真实识别
   if (faceBusy) return;
@@ -768,7 +773,7 @@ function faceIdTry() {
 // 改用主密码
 function usePassword() {
   document.getElementById('faceBox').classList.remove('show-actions');
-  document.getElementById('faceLabel').textContent = 'Face ID 解锁';
+  document.getElementById('faceLabel').textContent = FACE_NAME + '解锁';
   faceCloseCam();
   document.getElementById('unlockPw').focus();
 }
@@ -2718,15 +2723,15 @@ function settingTap(name) {
 })();
 // 启动：先加载本地持久化数据（刷新不还原演示数据）
 try { loadCardsData(); } catch (e) {}
-// 安卓版不含人脸验证：原生壳注入 window.__FV_NO_FACE → 隐藏锁屏人脸区与设置项
-// （前端其余代码不变，同一套原型三端共用）
-if (window.__FV_NO_FACE) {
+// 安卓壳注入 window.__FV_BIOMETRIC：文案由「Face ID」换成「生物识别」（系统指纹 / 机型支持时的人脸）。
+// 录入弹层（faceEnroll）是 iOS 的摄像头录脸 / 桌面演示用，安卓走系统弹窗，故隐藏。
+if (window.__FV_BIOMETRIC) {
   try {
-    const fr = document.getElementById('faceSetRow'); if (fr) fr.style.display = 'none';
-    const fb = document.getElementById('faceBox'); if (fb) fb.style.display = 'none';
+    const fr = document.getElementById('faceSetRow');
+    if (fr) { const kk = fr.querySelector('.k'); if (kk) kk.textContent = '生物识别解锁'; }
+    const fl = document.getElementById('faceLabel');
+    if (fl) fl.textContent = '生物识别解锁';
     const fe = document.getElementById('faceEnroll'); if (fe) fe.style.display = 'none';
-    fvFace = false;
-    try { localStorage.setItem('fvFace', 'false'); } catch (e) {}
   } catch (e) {}
 }
 
