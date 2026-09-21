@@ -87,6 +87,15 @@ app/
 - 因遗忘主密码、设备丢失、误删数据造成的损失，作者不承担责任。
 - 界面与实现与 FallVault iOS 版共用同一套网页原型；桌面版 FallVault 为独立项目。
 
+## 🔗 其它平台
+
+同一套 `.fvault` 加密备份格式，三端数据互通。
+
+| 平台 | 仓库 |
+|---|---|
+| Windows 桌面版 | [FallVault](https://github.com/b3050605492-bot/FallVault) |
+| iPhone / iPad | [FallVault-iOS](https://github.com/b3050605492-bot/FallVault-iOS) |
+
 ## License
 
 MIT
