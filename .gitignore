@@ -1,0 +1,20 @@
+# 构建产物
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 签名文件（绝不入库）
+.signing/
+*.keystore
+*.jks
+*.p12
+
+# 系统
+.DS_Store
+Thumbs.db

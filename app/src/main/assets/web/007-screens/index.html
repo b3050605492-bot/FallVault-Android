@@ -1,0 +1,1575 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- App 全屏必需：按设备宽度渲染 + viewport-fit=cover 才能拿到 env(safe-area-inset-*)；
+     桌面预览时这条也无害（固定 340px 手机框照常显示） -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>FallVault iOS · 多页原型（密码库/验证码/标签/设置）</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-font-smoothing: antialiased; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; background: #0a0a0e; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 24px; color: #fff; flex-direction: column; gap: 14px; }
+  .hdr { text-align: center; max-width: 430px; }
+  .hdr h2 { font-size: 16px; font-weight: 700; color: #64D2FF; }
+  .hdr p { font-size: 12.5px; color: rgba(255,255,255,.45); margin-top: 4px; }
+
+  /* ===== App 全屏模式 =====
+     装进 iOS App 时由 Swift 注入 html.app —— 去掉"桌面预览外壳"：
+     顶部说明、手机边框、模拟状态栏 / 灵动岛 / Home 条全部隐藏，改成真机全屏。 */
+  html.app, html.app body { display: block; width: 100%; height: 100%; padding: 0; margin: 0; background: #000; gap: 0; overflow: hidden; }   /* 真机 body 锁死不滚：双层滚动容器会让 iOS 手势被外层吃掉（切页后滚不动的根因） */
+  /* ⚠️ 不能给 html/body 设 overflow:hidden —— iOS WKWebView 上会吞掉内部 div 的触摸滚动（设置页滚不动真凶） */
+  html.app .hdr { display: none; }
+  html.app .phone { width: 100vw; height: 100vh; height: 100dvh; border-radius: 0; box-shadow: none; margin: 0;  position: relative; }   /* content 定位基准（页面不被挤到屏幕外）*/
+  html.app .island, html.app .status, html.app .home-bar { display: none; }
+
+  /* 灵动岛机器：状态栏区域比普通刘海高，主体整体再往下让一点，别被岛压住 */
+  html.app .content { padding-top: calc(env(safe-area-inset-top, 20px) + 12px); }
+  html.app .lock { padding-top: calc(env(safe-area-inset-top, 20px) + 8px); }
+
+  /* 内容永不越过悬浮 tab 栏：列表底部按「tab 高 76 + 下边距 12 + 安全区 + 余量」留白，超出部分靠上下滑动 */
+  html.app #tabbar { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  html.app /* 滚动/长按修复：密码库列表滑动不被系统长按(文本选择/放大镜)吞掉 */
+.list, .swipe-wrap, .swipe-wrap .card, .totp-card, .bc-gallery, .bg-item {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.list, .swipe-wrap { touch-action: pan-y; }
+#page-vault.content, #page-totp.content { display: flex; flex-direction: column; }
+  #page-vault .list, #page-totp #totpList {
+    flex: 1 1 auto;                  /* 纯 CSS 高度链：父 .content(flex列,inset:0) → 列表自然填满剩余空间 */
+    min-height: 0;                   /* flex 子项必须允许收缩，overflow 滚动才生效（iOS 可靠滚动的关键） */
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    overflow-y: scroll;          /* 用 scroll 而非 auto：iOS 上 auto 在内容判定不溢出时可能不建滚动层 → 滑动变长按选择 */
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding-bottom: 150px;  /* 底部安全区：滚到底时最后一条账号完整停在 tab 栏上方（safeBottom 校正后仍有富余） */
+    -webkit-user-select: none; user-select: none;   /* 兜底：滚动层死亡时 iOS 长按会触发文本选择/放大镜 */
+  }
+  #page-vault .list .empty, #page-totp #totpList .empty { margin: auto 0; }
+  /* 强制滚动引擎：JS 全接管手势（touch-action:none → 浏览器不参与，原生滚动层死活无所谓） */
+  #list, #totpList, #tagList, #settingsList { touch-action: none; }
+  /* 左滑编辑：swipe-wrap 声明只允许纵向手势 → 浏览器不接管横向（否则会发 touchcancel 杀掉 JS 左滑） */
+  .swipe-wrap { touch-action: pan-y; }
+
+  /* 全面优化：点按即时 + 无长按选择 + 无点按高亮 */
+  * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  #tabbar, #tabbar * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #tabbar .tb-slot, #tabbar .tb-add { touch-action: manipulation; }
+  #pill { pointer-events: none; }          /* 纯视觉框：不拦截任何点击 */
+  .chips, .chips * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .vseg, .vseg * { user-select: none; -webkit-user-select: none; }
+  html.app .screen .body { padding-bottom: calc(150px + env(safe-area-inset-bottom, 0px)); }
+  html.app .crop-overlay, html.app .search-overlay { padding-top: env(safe-area-inset-top, 0px); }
+
+  /* 像真 App：禁止选择文字 / 长按弹菜单 / 图片拖拽 / 点击高亮 */
+  html.app, html.app body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+  html.app input, html.app textarea { -webkit-user-select: text; user-select: text; }   /* 输入框仍可编辑 / 选择 */
+  html.app img { -webkit-user-drag: none; user-drag: none; pointer-events: none; }
+
+  /* 详情页「网站」做成可点链接（点击交系统浏览器打开） */
+  .dv.sitelink { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .dv.sitelink .out { font-size: 10px; opacity: .75; margin-left: 2px; }
+  .dv.sitelink:active { opacity: .55; }
+  .phone { --wallpaper: none; --tint: 255,255,255; width: 340px; height: 690px; border-radius: 40px; overflow: hidden; position: relative; background:
+      linear-gradient(180deg, rgba(0,0,0,.30) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,.55) 100%),
+      var(--wallpaper) center/cover no-repeat, #0a0a0e;
+    box-shadow: 0 24px 50px rgba(0,0,0,.6); }
+  .island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 110px; height: 30px; background: #000; border-radius: 18px; z-index: 60; }
+  .status { position: absolute; top: 16px; left: 28px; right: 28px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 700; color: #fff; z-index: 55; }
+  .status .r { display: flex; gap: 5px; align-items: center; font-size: 11px; }
+  .status .r svg { width: 14px; height: 11px; }
+
+  /* ===== 页面容器（多页切换） ===== */
+  .content { position: absolute; inset: 0; height: 100%; padding: 62px 16px 0; display: flex; flex-direction: column;
+    /* opacity 用 0.001 而不是 0：让页面常驻渲染，毛玻璃纹理得以缓存，
+       切页时只改变层的透明度 → 不再出现"模糊重新加载" */
+    opacity: 0.001; pointer-events: none;
+    transition: opacity .18s ease; }
+  .content.active { opacity: 1; pointer-events: auto; }
+
+  .title { font-size: 26px; font-weight: 800; letter-spacing: -0.6px; margin: 5px 2px 10px; text-shadow: 0 1px 8px rgba(0,0,0,.3); }
+  /* 搜索框 */
+  .search { display: flex; align-items: center; gap: 8px; padding: 10px 13px; border-radius: 14px; margin-bottom: 10px; background: rgba(255,255,255,.09); backdrop-filter: blur(22px) saturate(1.8); -webkit-backdrop-filter: blur(22px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.18); }
+  .search svg { width: 15px; height: 15px; stroke: rgba(255,255,255,.5); fill: none; stroke-width: 2.2; }
+  .search span { font-size: 14px; color: rgba(255,255,255,.42); }
+  /* 分类 chips */
+  .chips { display: flex; gap: 7px; margin-bottom: 10px; overflow: hidden; }
+  .chip { padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: rgba(255,255,255,.55); background: rgba(255,255,255,.08); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 0.5px solid rgba(255,255,255,.12); flex-shrink: 0; cursor: pointer; transition: transform .14s ease, background .2s ease, color .2s ease; font-family: inherit; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+  .chip:active { transform: scale(.94); }
+  .chip.on { background: linear-gradient(135deg, rgba(100,210,255,.9), rgba(10,132,255,.85)); color: #fff; border-color: transparent; box-shadow: 0 4px 14px rgba(10,132,255,.35); }
+  .list { flex: 1; overflow-y: scroll; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; display: block; padding-bottom: 120px; scrollbar-width: none; min-height: 0; }
+  .list + *, .list > * + * { margin-top: 9px; }
+  .list > * { flex-shrink: 0; }   /* ⚠️ 关键：列表是 flex 列，子元素必须禁止收缩 —— 否则内容一多（设置页/标签页）整行会被压扁、文字重叠、底部出现空框 */
+  .list::-webkit-scrollbar { display: none; }
+
+
+  /* ===== 分段切换：密码 | 卡片（照 Figma 246×51 圆角21）===== */
+  .vseg { position: relative; width: 246px; height: 51px; margin: 2px auto 12px; border-radius: 21px;
+    background: rgba(217,217,217,.14); border: .5px solid rgba(255,255,255,.12);
+    backdrop-filter: blur(20px) saturate(1.8); -webkit-backdrop-filter: blur(20px) saturate(1.8);
+    display: flex; align-items: center; padding: 4px; box-shadow: inset 0 1px 0 rgba(255,255,255,.14); }
+  .vseg-slider { position: absolute; top: 9px; height: 33px; width: 93px; border-radius: 43px;
+    background: rgba(245,245,245,.22); box-shadow: 0 4px 14px rgba(0,0,0,.25), inset 0 1px 1px rgba(255,255,255,.35);
+    transition: transform .34s cubic-bezier(.34,1.4,.5,1); left: 17px; pointer-events: none; }
+  .vseg-item { flex: 1; position: relative; z-index: 2; text-align: center; font-size: 12px; font-weight: 600;
+    color: rgba(255,255,255,.55); cursor: pointer; padding: 12px 0; -webkit-tap-highlight-color: transparent; }
+  .vseg-item.on { color: #fff; }
+
+  /* ===== 银行卡画廊（上下滑动切换；中间大、上下小）===== */
+  #bankView { display: none; flex: 1; min-height: 0; flex-direction: column; margin: 0 -16px; padding: 0; position: relative; }   /* 横向铺满（去掉页面两侧 16px 留白），330px 卡片不再被裁 */
+  #bankView.on { display: flex; }
+  .bank-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: pan-y; }
+  .bcard2 { --bcw: 330px; --bch: 204px; position: absolute; left: 50%; top: 50%;
+    width: var(--bcw); height: var(--bch); margin-left: calc(var(--bcw) / -2); margin-top: calc(var(--bch) / -2);
+    border-radius: 14px; overflow: hidden; color: #fff; cursor: pointer;
+    transition: transform .42s cubic-bezier(.3,1.35,.5,1), opacity .3s ease;
+    box-shadow: 0 12px 30px rgba(0,0,0,.30), inset 0 1.5px 1.5px rgba(255,255,255,.30); }
+  .bcard2.bc-blur { filter: blur(3.5px) brightness(.92); }
+  .bcard2 .shine { position: absolute; inset: 0; background: linear-gradient(118deg, rgba(255,255,255,.30) 0%, rgba(255,255,255,.06) 28%, rgba(255,255,255,0) 46%, rgba(255,255,255,.10) 72%, rgba(255,255,255,.22) 100%); mix-blend-mode: screen; pointer-events: none; }
+  .bcard2 .brow { position: absolute; left: 32px; right: 32px; }
+  .bcard2 .brow.top { top: 20px; display: flex; justify-content: space-between; align-items: center; height: 24px; }   /* 居中+等高：切换组织时银行名不再上下跳 */
+  .bcard2 .bankname { font-size: 16.5px; font-weight: 800; letter-spacing: .5px; text-shadow: 0 1px 6px rgba(0,0,0,.35); }
+  .bcard2 .orgmark { font-size: 13.5px; font-style: italic; font-weight: 800; opacity: .92; letter-spacing: .5px; text-shadow: 0 1px 4px rgba(0,0,0,.4); }
+  .bcard2 .num { top: 72px; font-size: 18px; font-weight: 600; letter-spacing: 2.2px; font-variant-numeric: tabular-nums; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .bcard2 .brow.bottom { bottom: 20px; display: flex; justify-content: space-between; font-size: 12.5px; opacity: .9; }
+  .bcard2 .brow.bottom b { font-size: 14.5px; letter-spacing: 1.5px; }
+  .bcard2.ghost-card { display: flex; align-items: center; justify-content: center; border: 2px dashed rgba(255,255,255,.3); background: rgba(217,217,217,.10); box-shadow: none; font-size: 15px; font-weight: 600; color: rgba(255,255,255,.6); }
+  .bank-actions { display: flex; gap: 9px; padding: 10px 2px 95px; flex-shrink: 0; }   /* 95px = tab栏69+底距12+余量，按钮不被 tab 栏盖住 */
+  .d-bigcard { margin: 0 0 14px; }
+  .d-bigcard .bcard2 { position: relative; left: 0 !important; right: auto; top: auto; width: 100%; height: auto; aspect-ratio: 1.618; margin: 0 !important; border-radius: 14px; }
+  .bank-btn { flex: 1; text-align: center; padding: 12px; border-radius: 16px; font-size: 13.5px; font-weight: 600; cursor: pointer;
+    background: linear-gradient(145deg, rgba(100,210,255,.85), rgba(10,132,255,.8)); color: #fff; box-shadow: 0 6px 18px rgba(10,132,255,.3); }
+  .bank-btn.ghost { background: rgba(255,255,255,.10); border: .5px solid rgba(255,255,255,.16); color: rgba(255,255,255,.85); box-shadow: none; }
+
+  .bcb-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .bcb-ol { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.10) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,.30) 100%); }
+
+  /* ===== 卡组织图形标志（CSS 画，无需图片）===== */
+  .org-badge { display: inline-flex; align-items: center; gap: 6px; }
+  .org-badge .ob-ico { width: 34px; height: 23px; display: block; border-radius: 3px; box-shadow: 0 1px 4px rgba(0,0,0,.28); }
+  .org-badge b { font-size: 10.5px; font-weight: 800; letter-spacing: .3px; text-shadow: 0 1px 3px rgba(0,0,0,.5); }
+  .org-unionpay .ob-ico { background: linear-gradient(90deg, #E4001C 0 33%, #0072CE 33% 66%, #009B3A 66%); border-radius: 2px; }
+  .org-unionpay b { font-family: inherit; font-weight: 700; }
+  .org-visa .ob-ico { display: none; }
+  .org-visa b { font-style: italic; font-size: 15px; font-weight: 800; letter-spacing: .5px; filter: drop-shadow(0 1px 2px rgba(0,0,0,.5)); }
+  .org-mastercard .ob-ico { background: radial-gradient(circle at 28% 52%, #EB001B 0 46%, rgba(235,0,27,.0) 50%), radial-gradient(circle at 72% 52%, #F79E1B 0 46%, rgba(247,158,27,0) 50%); box-shadow: 0 0 1px rgba(0,0,0,.25); }
+  .org-mastercard b { font-size: 9.5px; letter-spacing: 0; }
+  .org-jcb .ob-ico { background: linear-gradient(90deg, #0E4C97 0 33%, #fff 33% 66%, #C4142C 66%); }
+  .org-amex .ob-ico { background: #2E77BC; }
+  .org-amex b { font-style: italic; font-weight: 800; }
+  .org-discover .ob-ico { display: none; }
+  .org-discover b { font-weight: 800; color: #F5821F; }
+  .org-custom .ob-ico { display: none; }
+
+  /* 新建表单里的预览 + 配色选择 */
+  .bf-preview { display: flex; justify-content: center; }
+  .bf-preview .bcard2 { position: relative; left: 0; top: 0; margin: 0; width: 100%; height: 200px; border-radius: 14px; }
+    .bf-colors { display: flex; gap: 8px; flex-wrap: wrap; }
+  .bf-color { width: 44px; height: 30px; border-radius: 9px; cursor: pointer; border: 2px solid transparent; box-shadow: 0 3px 10px rgba(0,0,0,.3); }
+  .bf-color.on { border-color: #fff; }
+  .bf-orgrow { display: flex; flex-direction: column; gap: 7px; }
+  .gs-box { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.14); color: #fff; font-size: 14.5px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .gs-menu { border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,.14); background: #1c1e28; margin-top: 6px; box-shadow: 0 14px 40px rgba(0,0,0,.5); }
+  .gs-opt { padding: 12px 14px; font-size: 13.5px; color: rgba(255,255,255,.85); cursor: pointer; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .gs-opt:last-child { border-bottom: 0; }
+  .gs-opt.on { background: rgba(100,210,255,.12); color: #64D2FF; }
+  .gs-opt:active { background: rgba(255,255,255,.1); }
+  .gs-del { font-size: 11px; color: #FF6961; padding: 4px 8px; border-radius: 7px; background: rgba(255,105,97,.1); margin-left: 8px; flex-shrink: 0; }
+  .gs-del:active { background: rgba(255,105,97,.25); }
+
+  select.einput, .bf-orgrow select.einput { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, rgba(255,255,255,.5) 50%), linear-gradient(135deg, rgba(255,255,255,.5) 50%, transparent 50%); background-position: calc(100% - 16px) 50%, calc(100% - 11px) 50%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 30px; }
+  .bf-orgrow select.einput option { background: #1c1e28; color: #fff; }
+  .bf-faces { display: none; }
+
+  .bf-faces { display: flex; gap: 8px; flex-wrap: wrap; }
+  .bf-face { position: relative; width: 74px; height: 46px; border-radius: 7px; overflow: hidden; cursor: pointer; border: 2px solid transparent; background: rgba(255,255,255,.08); display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+  .bf-face img { width: 100%; height: 100%; object-fit: cover; }
+  .bf-face.on { border-color: #64D2FF; box-shadow: 0 0 0 2px rgba(100,210,255,.25); }
+
+
+  .card { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 16px; background: rgba(255,255,255,.075); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.11); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 6px 20px rgba(0,0,0,.22); transition: transform .15s, background .2s; cursor: pointer; }
+  .card:hover { transform: translateY(-1px); background: rgba(255,255,255,.11); }
+  .card .ico { width: 38px; height: 38px; border-radius: 11px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; color: #fff; flex-shrink: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 4px 12px rgba(0,0,0,.3); }
+  .card .meta { flex: 1; min-width: 0; }
+  .card .meta .t { font-size: 14.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .meta .s { font-size: 11.5px; color: rgba(255,255,255,.45); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .card .chev { width: 15px; height: 15px; stroke: rgba(255,255,255,.28); stroke-width: 2.4; fill: none; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .card .fstar { width: 13px; height: 13px; fill: #FFD60A; stroke: #FFD60A; stroke-width: 1; flex-shrink: 0; }
+
+  /* ===== 验证码页 ===== */
+  .totp-hint { font-size: 12px; color: rgba(255,255,255,.4); margin: 0 2px 10px; display: flex; align-items: center; gap: 5px; }
+  .totp-hint svg { width: 13px; height: 13px; stroke: rgba(255,255,255,.45); fill: none; stroke-width: 1.8; }
+  .totp-card { display: flex; align-items: center; gap: 11px; padding: 13px 14px; border-radius: 16px; background: rgba(255,255,255,.075); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.11); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 6px 20px rgba(0,0,0,.22); transition: transform .15s, background .2s; cursor: pointer; user-select: none; }
+  .totp-card:hover { transform: translateY(-1px); background: rgba(255,255,255,.11); }
+  .totp-card:active { transform: scale(.98); }
+  .totp-card .ico { width: 40px; height: 40px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 700; color: #fff; flex-shrink: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 4px 12px rgba(0,0,0,.3); }
+  .totp-card .meta { flex: 1; min-width: 0; }
+  .totp-card .meta .t { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .totp-card .meta .s { font-size: 11px; color: rgba(255,255,255,.42); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .totp-card .code { font-family: 'SF Mono', ui-monospace, 'Menlo', monospace; font-size: 21px; font-weight: 700; letter-spacing: 2.2px; color: #64D2FF; text-shadow: 0 0 18px rgba(100,210,255,.45); font-variant-numeric: tabular-nums; }
+  .totp-card .code.expiring { color: #FF9F0A; text-shadow: 0 0 18px rgba(255,159,10,.5); animation: pulse .9s ease infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+  /* 倒计时圆环 */
+  .ring { width: 30px; height: 30px; flex-shrink: 0; position: relative; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring .track { fill: none; stroke: rgba(100,210,255,.16); stroke-width: 3; }
+  .ring .bar { fill: none; stroke: #64D2FF; stroke-width: 3; stroke-linecap: round; transition: stroke .3s; }
+  .ring.expiring .bar { stroke: #FF9F0A; }
+  .ring .sec { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 9.5px; font-weight: 700; color: rgba(255,255,255,.75); font-variant-numeric: tabular-nums; }
+
+  /* ===== 标签页 ===== */
+  .tag-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 16px; background: rgba(255,255,255,.075); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.11); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 6px 20px rgba(0,0,0,.22); cursor: pointer; transition: transform .15s, background .2s; }
+  .tag-card:hover { transform: translateY(-1px); background: rgba(255,255,255,.11); }
+  .tag-card .dot { width: 12px; height: 12px; border-radius: 4px; flex-shrink: 0; }
+  .tag-card .n { flex: 1; font-size: 14.5px; font-weight: 600; }
+  .tag-card .c { font-size: 12.5px; color: rgba(255,255,255,.4); font-variant-numeric: tabular-nums; }
+
+  /* ===== 设置页 ===== */
+  .group { border-radius: 16px; overflow: hidden; background: rgba(255,255,255,.075); backdrop-filter: blur(26px) saturate(1.8); -webkit-backdrop-filter: blur(26px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.11); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 6px 20px rgba(0,0,0,.22); margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; font-size: 14px; cursor: pointer; }
+  .row .ri { width: 17px; height: 17px; fill: none; stroke: #64D2FF; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .row + .row { border-top: 0.5px solid rgba(255,255,255,.07); }
+  .row .k { flex: 1; font-weight: 500; }
+  .row .v { color: rgba(255,255,255,.42); font-size: 12.5px; }
+  .row .chev { width: 12px; height: 12px; stroke: rgba(255,255,255,.3); fill: none; stroke-width: 2.5; stroke-linecap: round; }
+  .sec-title { font-size: 12px; font-weight: 600; color: rgba(255,255,255,.38); margin: 4px 4px 7px; letter-spacing: .3px; }
+
+  /* ===== 液玻璃底栏（黑盒式，悬浮版·紧凑） ===== */
+  #tabbar {
+    position: absolute; bottom: 12px; left: 14px; right: 18px; height: 69px; z-index: 40;
+    background: rgba(116,108,108,.22);   /* 固定色，不随页面/环境变色 */
+    backdrop-filter: blur(22px) saturate(2);
+    -webkit-backdrop-filter: blur(22px) saturate(2);
+    border-radius: 26px;
+    box-shadow: 0 12px 36px rgba(0,0,0,.45);
+    display: flex; align-items: stretch;
+    /* Figma 布尔缺口：顶部中央挖半圆（圆心在顶下 8px，半径 37）— 过渡加宽让尖角圆润 */
+  }
+  #tabbar::before { content: ""; position: absolute; inset: 0; z-index: 5; pointer-events: none; border-radius: 26px; box-shadow: inset 0 1px 0 rgba(255,255,255,.16), inset 0 -1px 0 rgba(255,255,255,.04); }
+  #tabbar::after { content: ""; position: absolute; inset: 0; z-index: 4; pointer-events: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.12), inset 0 -28px 56px -30px rgba(120,180,255,.22); border-radius: 26px; }
+  .tb-row { display: flex; position: absolute; inset: 0; align-items: stretch; z-index: 2; }
+  .tb-slot { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; position: relative; flex: 0 0 0; min-width: 0; transition: flex-grow .30s cubic-bezier(.34,1.3,.5,1); }
+  .tb-slot .ic { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; z-index: 2; transition: transform .22s cubic-bezier(.34,1.56,.64,1); }
+  .tb-slot .ic svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: color .12s linear; }
+  .tb-slot .lb { font-size: 9.5px; font-weight: 600; letter-spacing: .4px; height: 12px; display: flex; align-items: center; white-space: nowrap; z-index: 2; }
+  .tb-slot .lb span { opacity: 0; transform: translateY(3px); transition: opacity .22s, transform .22s; }
+  .tb-slot.on .lb span { opacity: 1; transform: translateY(0); }
+  .tb-slot .ic { color: rgba(255,255,255, calc(.40 + .60 * var(--lit, 0))); transform: scale(calc(1 + .10 * var(--lit, 0))); filter: drop-shadow(0 1px calc(6px * var(--lit, 0)) rgba(255,255,255, calc(.5 * var(--lit, 0)))); }
+  .tb-slot.on .ic { color: #fff; }
+  .tb-pill {
+    position: absolute; z-index: 60; pointer-events: none;   /* 水珠顶层：滑过 + 号时显示在前面 */
+    left: 0; top: 0; width: 44px; height: 44px;   /* 基础尺寸；引擎直接定位宽高，贴合图标+文字 */
+    border-radius: 12px;   /* 圆角方形选中态 */
+    transform-origin: 0 0;   /* ⚠️ 必须左上角：引擎 translate3d(左上角) + scale 时中心才准（origin=center 会随变形偏移） */
+    will-change: transform;
+    background: linear-gradient(145deg, rgba(255,255,255,.34), rgba(255,255,255,.10) 50%, rgba(255,255,255,.12) 75%, rgba(255,255,255,.24));
+    backdrop-filter: blur(48px) saturate(2.8);
+    -webkit-backdrop-filter: blur(48px) saturate(2.8);
+    box-shadow: inset 0 2px 1.5px rgba(255,255,255,.6), inset 0 -3px 8px rgba(255,255,255,.08), inset 2px 0 3px rgba(255,255,255,.2), inset -2px 0 3px rgba(255,255,255,.2), 0 14px 34px rgba(0,0,0,.4);
+    border: 0.6px solid rgba(255,255,255,.32);
+    overflow: hidden;
+    will-change: transform, width;
+    transition: border-radius .28s cubic-bezier(.3,1.2,.5,1);
+  }
+  .tb-pill::after { content: ""; position: absolute; bottom: 0; left: 6%; right: 6%; height: 45%; background: linear-gradient(180deg, transparent, rgba(160,210,255,.16)); border-radius: inherit; }
+  .tb-pill .disp { display: none; }   /* 回到最初：纯白玻璃，无彩虹渐变 */
+  .tb-pill:hover .disp { opacity: .9; }
+  .tb-gap { position: relative; z-index: 2; display: flex; align-items: center; justify-content: center; flex: 0 0 0; min-width: 0; transition: flex-grow .42s cubic-bezier(.34,1.3,.5,1); }
+
+  /* ===== + 号独立层（Figma 复刻）===== */
+  .fab-outer { position: absolute; left: 50%; bottom: calc(12px + (69px - 50px) / 2 + env(safe-area-inset-bottom, 0px)); width: 50px; height: 50px; margin-left: -25px; z-index: 46; }   /* 贴合 tab 栏：＋号完全在栏内居中（不凸出） */
+  .fab-outer .fab {
+    width: 50px; height: 50px; border-radius: 50%;
+    background: linear-gradient(145deg, rgba(255,255,255,.92), rgba(255,255,255,.55)); border: .6px solid rgba(255,255,255,.7);
+    box-shadow: inset 0 1.5px 1.5px rgba(255,255,255,.6);   /* 无黑色外阴影 */
+    display: flex; align-items: center; justify-content: center; color: #333; cursor: pointer;
+    transition: background .25s ease, transform .16s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .fab-outer .fab:active { transform: scale(.92); }
+  .fab-outer .fab.tap { animation: fabTap .46s cubic-bezier(.34,1.56,.64,1); }
+  .fab-outer .fab svg { width: 21px; height: 21px; stroke: #2E2B2B; fill: none; stroke-width: 2.4; stroke-linecap: round; }
+  .fab-outer .fab #fbSvg { transition: transform .28s cubic-bezier(.34,1.4,.5,1); transform-origin: center; }
+  .fab-outer .fab.open { background: linear-gradient(145deg, #64D2FF, #0A84FF); box-shadow: 0 8px 22px rgba(10,132,255,.4), inset 0 1.5px 1.5px rgba(255,255,255,.5); }
+  .fab-outer .fab.open svg { stroke: #fff; }
+  .fab-outer .fab.open #fbSvg { transform: rotate(45deg); }   /* + 变 X */
+
+  /* 三个 37px 扇叶圆（对照 Figma 弧形坐标：中上(0,-68) 左下(-43,-38) 右下(+47,-38)） */
+  .fab-act {
+    position: absolute; left: 50%; bottom: 50%; width: 37px; height: 37px; margin-left: -18.5px; margin-bottom: -18.5px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: #D9D9D9; color: #3a3a3a; cursor: pointer; opacity: 0; pointer-events: none;
+    box-shadow: 0 5px 14px rgba(0,0,0,.28), inset 0 1px 1px rgba(255,255,255,.65);
+    transform: translate(0,0) scale(.15); transition: transform .36s cubic-bezier(.3,1.5,.55,1), opacity .16s ease;
+  }
+  .fab-act svg { width: 18px; height: 18px; stroke-width: 2.2; }
+  .fab-outer.open .fab-act { opacity: 1; pointer-events: auto; }
+  .fab-outer.open .fab-act.a1 { transform: translate(0px, -68px) scale(1); }
+  .fab-outer.open .fab-act.a2 { transform: translate(-43px, -38px) scale(1); }
+  .fab-outer.open .fab-act.a3 { transform: translate(47px, -38px) scale(1); }
+
+  .tb-gap .fab { width: 38px; height: 38px; border-radius: 50%; background: linear-gradient(145deg, rgba(255,255,255,.42), rgba(255,255,255,.13)); backdrop-filter: blur(32px) saturate(2.3); -webkit-backdrop-filter: blur(32px) saturate(2.3); box-shadow: inset 0 1.5px 1.5px rgba(255,255,255,.65); border: 0.6px solid rgba(255,255,255,.38); display: flex; align-items: center; justify-content: center; color: #fff; cursor: pointer; }   /* 无黑色外阴影 */
+  .tb-gap .fab svg { width: 19px; height: 19px; stroke: #fff; fill: none; stroke-width: 2.1; stroke-linecap: round; }
+  /* 新建账号加号：点击弹动（+ 触发一次触感反馈） */
+  .tb-gap .fab { transition: transform .16s ease; -webkit-tap-highlight-color: transparent; }
+  .tb-gap .fab:active { transform: scale(.88); }
+  .tb-gap .fab.tap { animation: fabTap .46s cubic-bezier(.34,1.56,.64,1); }
+
+  @keyframes fabTap {
+    0%   { transform: scale(1); }
+    28%  { transform: scale(.80); }
+    58%  { transform: scale(1.15); }
+    82%  { transform: scale(.97); }
+    100% { transform: scale(1); }
+  }
+  .tb-slot:active .ic { transform: scale(0.88); }
+  .tb-gap .fab:active { transform: scale(0.92); }
+
+  /* Toast 提示 */
+  .toast { position: absolute; left: 50%; bottom: 104px; transform: translateX(-50%) translateY(8px); padding: 9px 16px; border-radius: 999px; background: rgba(20,22,28,.82); backdrop-filter: blur(30px) saturate(2); -webkit-backdrop-filter: blur(30px) saturate(2); border: 0.5px solid rgba(255,255,255,.18); box-shadow: 0 10px 30px rgba(0,0,0,.5); font-size: 12.5px; font-weight: 600; color: #fff; opacity: 0; pointer-events: none; transition: opacity .25s, transform .3s cubic-bezier(.3,1.3,.5,1); z-index: 80; white-space: nowrap; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ===== 标题行 + 右上角搜索按钮 ===== */
+  .title-row { display: flex; align-items: center; justify-content: space-between; margin: 5px 2px 10px; gap: 10px; }
+  .title-row .title { margin: 0; }
+  .search-btn { width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.09); backdrop-filter: blur(20px) saturate(1.8); -webkit-backdrop-filter: blur(20px) saturate(1.8); border: 0.5px solid rgba(255,255,255,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.18); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform .15s, background .2s; flex-shrink: 0; }
+  .search-btn:hover { background: rgba(255,255,255,.16); }
+  .search-btn:active { transform: scale(.9); }
+  .search-btn svg { width: 16px; height: 16px; stroke: #fff; fill: none; stroke-width: 2.1; stroke-linecap: round; }
+
+  /* ===== 居中搜索浮层 ===== */
+  .search-overlay { position: absolute; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px); opacity: 0; pointer-events: none; transition: opacity .22s ease; }
+  .search-overlay.show { opacity: 1; pointer-events: auto; }
+  .search-modal { width: 80%; display: flex; align-items: center; gap: 9px; padding: 13px 14px; border-radius: 17px; background: rgba(28,30,38,.88); -webkit-backdrop-filter: blur(44px) saturate(2); backdrop-filter: blur(44px) saturate(2); border: 0.6px solid rgba(255,255,255,.2); box-shadow: 0 22px 60px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.14); transform: scale(.92); transition: transform .26s cubic-bezier(.3,1.3,.5,1); }
+  .search-overlay.show .search-modal { transform: scale(1); }
+  .search-modal > svg { width: 16px; height: 16px; stroke: rgba(255,255,255,.6); fill: none; stroke-width: 2.1; stroke-linecap: round; flex-shrink: 0; }
+  .search-modal input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: #fff; font-size: 15px; font-family: inherit; font-weight: 500; }
+  .search-modal input::placeholder { color: rgba(255,255,255,.35); }
+  .search-modal .sbtn { width: 29px; height: 29px; border-radius: 50%; background: linear-gradient(135deg, rgba(100,210,255,.85), rgba(10,132,255,.8)); box-shadow: 0 4px 14px rgba(10,132,255,.4), inset 0 1px 0 rgba(255,255,255,.4); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: transform .15s; }
+  .search-modal .sbtn:active { transform: scale(.88); }
+  .search-modal .sbtn svg { width: 14px; height: 14px; stroke: #fff; fill: none; stroke-width: 2.4; stroke-linecap: round; }
+
+  /* 空结果 */
+  .empty { text-align: center; color: rgba(255,255,255,.35); font-size: 13px; padding: 34px 0; }
+  .vs-track {
+    position: absolute; right: 0; width: 36px;  /* 触控区加宽（拇指视觉 7px 居中，好点中） */
+    z-index: 30; opacity: 0; transition: opacity .35s ease;
+    touch-action: none;
+  }
+  .vs-zone {
+    position: absolute; right: 0; width: 42px;
+    z-index: 60; background: transparent;
+    touch-action: none;
+    display: none;                    /* 滑块方案已弃用：滚动回归纯原生（热区层会拦截右缘手势，必须隐藏） */
+  }
+  .vs-track { display: none; }        /* 滑块方案已弃用：删除右侧滑块显示（密码库/验证码/卡片页） */
+  .vs-track.show { opacity: 1; }
+  .vs-track .vs-thumb {
+    position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+    width: 7px; min-height: 36px; border-radius: 999px;
+    background: linear-gradient(180deg, rgba(255,255,255,.5), rgba(255,255,255,.24));
+    box-shadow: 0 2px 12px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.32), inset 0 -1px 0 rgba(255,255,255,.08);
+    backdrop-filter: blur(24px) saturate(1.8); -webkit-backdrop-filter: blur(24px) saturate(1.8);
+    transition: transform .14s ease-out, width .18s ease, opacity .3s;
+    will-change: transform;
+  }
+  .vs-track.active .vs-thumb { width: 11px; background: linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.42)); }
+  .vs-track.hold .vs-thumb { transition: transform 0s; }
+  /* page-vault / page-totp 保持 absolute 定位（.content 统一定义）；滑块由 vsPlace 绝对坐标定位 */
+
+  /* ===== 锁屏（半透明灰玻璃：重模糊看不见内容，但透出背景色调） ===== */
+  .lock { position: absolute; inset: 0; z-index: 210; overflow: hidden;   /* 最高层级：任何弹层/扇叶残留都盖不住锁屏 */ display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 13px;
+    /* 分层：模糊壁纸层(.lock-bg) → 玻璃灰层(::after) → 内容
+       刻意不用 backdrop-filter —— 它会把背后的「应用界面」也一起糊出来 */
+    background: #0a0a0e;
+    -webkit-font-smoothing: antialiased;
+    transition: opacity .45s ease, transform .55s cubic-bezier(.3,1,.4,1); }
+  /* 壁纸层：模糊处理 → 隐隐约约的玻璃感 */
+  .lock .lock-bg { position: absolute; inset: -26px; background: var(--wallpaper) center/cover no-repeat; filter: blur(16px) saturate(1.25); }
+  /* 玻璃灰层：叠在壁纸之上，压暗并统一色调 */
+  .lock::after { content: ''; position: absolute; inset: 0; pointer-events: none;
+    background:
+      radial-gradient(130% 90% at 50% -10%, rgba(255,255,255,.06), transparent 55%),
+      radial-gradient(100% 70% at 50% 112%, rgba(120,150,200,.08), transparent 62%),
+      linear-gradient(168deg, rgba(38,40,46,.34) 0%, rgba(26,28,33,.42) 46%, rgba(32,34,40,.36) 78%, rgba(23,25,29,.48) 100%); }
+  /* 内容层压在两层背景之上 */
+  .lock > *:not(.lock-bg):not(.hint) { position: relative; z-index: 1; }
+  .lock .hint { z-index: 1; }
+  .lock.hide { opacity: 0; transform: scale(1.08); pointer-events: none; }
+  /* Logo：克制尺寸，柔和光晕 */
+  .lock .appicon { display: flex; align-items: center; justify-content: center; }
+  .lock .appicon img { width: 72px; height: auto; filter: drop-shadow(0 4px 16px rgba(0,150,255,.3)); }
+  .lock h1 { font-size: 17px; font-weight: 600; letter-spacing: -.2px; color: rgba(255,255,255,.96); }
+  .lock .sub { font-size: 12px; color: rgba(255,255,255,.45); margin-top: -7px; letter-spacing: -.1px; }
+  /* 输入框：iOS 表单规格 —— 44px 高 / 11px 圆角 / 无边框无高光 */
+  .lock .pwwrap { width: 76%; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 13px; border-radius: 11px; background: rgba(255,255,255,.07); backdrop-filter: blur(30px) saturate(1.6); -webkit-backdrop-filter: blur(30px) saturate(1.6); border: 0.5px solid rgba(255,255,255,.13); box-shadow: none; margin-top: 0; transition: background .25s, border-color .25s, box-shadow .3s; }
+  .lock .pwwrap .lock-ic { width: 15px; height: 15px; stroke: rgba(255,255,255,.5); fill: none; stroke-width: 2; flex-shrink: 0; transition: stroke .25s; }
+  .lock .pwwrap input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: #fff; font-size: 15px; letter-spacing: 1.5px; font-family: inherit; }
+  .lock .pwwrap input::placeholder { color: rgba(255,255,255,.32); letter-spacing: 0; font-size: 13.5px; }
+  .lock .pwwrap .ok-ic { width: 16px; height: 16px; stroke: #30D158; fill: none; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; transform: scale(.4); transition: opacity .25s, transform .32s cubic-bezier(.34,1.5,.64,1); flex-shrink: 0; }
+  /* 密码正确：变绿 + 勾弹出 */
+  .lock .pwwrap.ok { border-color: rgba(48,209,88,.6); background: rgba(48,209,88,.12); box-shadow: 0 0 0 4px rgba(48,209,88,.09); }
+  .lock .pwwrap.ok .lock-ic { stroke: #30D158; }
+  .lock .pwwrap.ok .ok-ic { opacity: 1; transform: scale(1); }
+  /* 密码错误：变红 + 抖动 */
+  .lock .pwwrap.err { border-color: rgba(255,69,58,.55); background: rgba(255,69,58,.1); box-shadow: 0 0 0 4px rgba(255,69,58,.07); animation: faceShake .6s cubic-bezier(.36,.07,.19,.97); }
+  .lock .pwwrap.err .lock-ic { stroke: #FF453A; }
+  /* 错误提示文字（流式排布，不再绝对定位） */
+  .lock .lockmsg { position: static; margin: 0; min-height: 15px; font-size: 12px; font-weight: 500; color: #FF6961; opacity: 0; transform: translateY(3px); transition: opacity .25s, transform .3s; text-align: center; }
+  .lock .lockmsg.show { opacity: 1; transform: translateY(0); }
+  /* 主按钮：与输入框同宽的干净玻璃，无渐变无彩色阴影 */
+  .lock .unlock { width: 76%; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 11px; background: rgba(255,255,255,.15); text-align: center; font-size: 15px; font-weight: 600; color: #fff; box-shadow: none; cursor: pointer; transition: transform .15s, background .2s; }
+  .lock .unlock:hover { background: rgba(255,255,255,.2); }
+  .lock .unlock:active { transform: scale(.985); }
+  .lock .faceid { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-top: 2px; cursor: pointer; }
+  .lock .faceid .fbtn { width: 48px; height: 48px; border-radius: 50%; background: rgba(255,255,255,.09); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px); border: 0.5px solid rgba(255,255,255,.18); box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 4px 14px rgba(0,0,0,.28); display: flex; align-items: center; justify-content: center; transition: background .25s, border-color .25s, box-shadow .3s; position: relative; }
+  .lock .faceid:active .fbtn { transform: scale(.93); }
+  .lock .faceid span { font-size: 11px; color: rgba(255,255,255,.45); transition: color .25s; }
+  /* 图标层叠：脸图标 + 对勾（成功时切换） */
+  .lock .faceid .fbtn svg { width: 23px; height: 23px; fill: none; stroke-linecap: round; stroke-linejoin: round; transition: opacity .2s ease, transform .34s cubic-bezier(.34,1.5,.64,1); }
+  .lock .faceid .fbtn .ic-face { stroke: #fff; stroke-width: 1.7; }
+  .lock .faceid .fbtn .ic-check { stroke: #30D158; stroke-width: 2.3; opacity: 0; transform: scale(.45); position: absolute; }
+  /* 扫描中：脸图标呼吸脉冲（Apple 式） */
+  .lock.scanning .faceid .fbtn .ic-face { animation: facePulse 1.3s ease-in-out infinite; }
+  @keyframes facePulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.09); opacity: .68; }
+  }
+  .lock.scanning .faceid .fbtn { border-color: rgba(255,255,255,.42); box-shadow: inset 0 1px 0 rgba(255,255,255,.4), 0 0 0 5px rgba(255,255,255,.06), 0 8px 24px rgba(0,0,0,.4); }
+  /* 成功：变绿 + 脸图标淡出、对勾弹性放大 */
+  .lock.success .faceid .fbtn { background: rgba(48,209,88,.16); border-color: rgba(48,209,88,.6); box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 0 0 5px rgba(48,209,88,.1), 0 8px 26px rgba(48,209,88,.32); }
+  .lock.success .faceid .fbtn .ic-face { opacity: 0; transform: scale(.55); }
+  .lock.success .faceid .fbtn .ic-check { opacity: 1; transform: scale(1); }
+  .lock.success .faceid span { color: #30D158; }
+  /* 失败：变红 + 左右抖动（Apple 式 shake）+ 提示再试一次 */
+  .lock.fail .faceid .fbtn { background: rgba(255,69,58,.14); border-color: rgba(255,69,58,.5); box-shadow: inset 0 1px 0 rgba(255,255,255,.25), 0 0 0 5px rgba(255,69,58,.08), 0 8px 24px rgba(255,69,58,.25); animation: faceShake .62s cubic-bezier(.36,.07,.19,.97); }
+  .lock.fail .faceid .fbtn .ic-face { stroke: #FF453A; }
+  .lock.fail .faceid span { color: #FF453A; }
+  @keyframes faceShake {
+    10%, 90% { transform: translateX(-2px); }
+    20%, 80% { transform: translateX(4px); }
+    30%, 50%, 70% { transform: translateX(-6px); }
+    40%, 60% { transform: translateX(6px); }
+  }
+  .lock .hint { position: absolute; bottom: 42px; font-size: 11px; color: rgba(255,255,255,.3); }
+
+  /* ===== 全屏子页（详情/编辑，右侧滑入） ===== */
+  .screen { position: absolute; inset: 0; z-index: 55; display: flex; flex-direction: column; background:
+      linear-gradient(180deg, rgba(10,11,15,.74) 0%, rgba(10,11,15,.88) 100%),
+      var(--wallpaper) center/cover no-repeat, #0a0a0e;
+    transform: translateX(103%); transition: transform .42s cubic-bezier(.32,.72,0,1); }
+  .screen.show { transform: none; }
+  .screen .nav { display: flex; align-items: center; gap: 10px; padding: 56px 16px 12px; }
+  .screen .nav .back { width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.1); border: 0.5px solid rgba(255,255,255,.16); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: transform .15s; }
+  .screen .nav .back:active { transform: scale(.9); }
+  .screen .nav .back svg { width: 15px; height: 15px; stroke: #fff; fill: none; stroke-width: 2.4; stroke-linecap: round; }
+  .screen .nav .ntitle { flex: 1; font-size: 17px; font-weight: 700; letter-spacing: -.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .screen .nav .act { font-size: 14.5px; font-weight: 600; color: #64D2FF; cursor: pointer; padding: 6px 4px; flex-shrink: 0; }
+  .screen .body { flex: 1; overflow-y: auto; padding: 0 16px 34px; scrollbar-width: none; display: flex; flex-direction: column; gap: 10px; }
+  .screen .body::-webkit-scrollbar { display: none; }
+
+  .dhero { display: flex; flex-direction: column; align-items: center; gap: 9px; padding: 12px 0 6px; }
+  .dhero .bigico { width: 68px; height: 68px; border-radius: 19px; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700; color: #fff; box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 10px 26px rgba(0,0,0,.4); }
+  .dhero .dn { font-size: 19px; font-weight: 700; }
+  .dhero .dc { font-size: 12px; color: rgba(255,255,255,.45); display: flex; align-items: center; justify-content: center; gap: 5px; }
+  .drow { display: flex; align-items: center; gap: 12px; padding: 13px 15px; font-size: 14.5px; }
+  .drow + .drow { border-top: 0.5px solid rgba(255,255,255,.07); }
+  .drow .dk { width: 56px; font-size: 12px; color: rgba(255,255,255,.42); flex-shrink: 0; }
+  .drow .dv { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drow .dv.mono { font-family: 'SF Mono', ui-monospace, monospace; letter-spacing: 1px; }
+  .drow .cp { width: 28px; height: 28px; border-radius: 8px; background: rgba(100,210,255,.14); border: 0.5px solid rgba(100,210,255,.3); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; transition: transform .15s; }
+  .drow .cp:active { transform: scale(.9); }
+  .drow .cp svg { width: 13px; height: 13px; stroke: #64D2FF; fill: none; stroke-width: 2; stroke-linecap: round; }
+  .drow .vi { width: 28px; height: 28px; border-radius: 8px; background: rgba(255,255,255,.1); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+  .drow .vi svg { width: 14px; height: 14px; stroke: rgba(255,255,255,.7); fill: none; stroke-width: 1.9; stroke-linecap: round; }
+  .dsec { font-size: 12px; font-weight: 600; color: rgba(255,255,255,.38); margin: 8px 4px -2px; letter-spacing: .3px; }
+  .sbar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.1); overflow: hidden; }
+  .sbar i { display: block; height: 100%; border-radius: 3px; transition: width .45s cubic-bezier(.32,.72,0,1); }
+  .chev2 { width: 14px; height: 14px; stroke: rgba(255,255,255,.3); fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+  .dc .sfav { width: 12px; height: 12px; fill: none; stroke: rgba(255,255,255,.45); stroke-width: 2; stroke-linejoin: round; vertical-align: -1px; }
+  .dc .sfav.on { fill: #FFD60A; stroke: #FFD60A; }
+  .danger { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 13px; border-radius: 16px; background: rgba(255,69,58,.14); border: 0.5px solid rgba(255,69,58,.32); color: #FF6961; font-size: 14.5px; font-weight: 600; cursor: pointer; margin-top: 6px; }
+  .danger:active { transform: scale(.98); }
+
+  /* ===== 编辑表单 ===== */
+  .field { display: flex; align-items: center; gap: 10px; padding: 13px 15px; }
+  .field + .field { border-top: 0.5px solid rgba(255,255,255,.07); }
+  .field .fk { width: 56px; font-size: 12px; color: rgba(255,255,255,.42); flex-shrink: 0; }
+  .field input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: #fff; font-size: 14.5px; font-family: inherit; }
+  .field input::placeholder { color: rgba(255,255,255,.28); }
+  .field .mini { width: 28px; height: 28px; border-radius: 8px; background: rgba(100,210,255,.14); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; }
+  .field .mini svg { width: 14px; height: 14px; stroke: #64D2FF; fill: none; stroke-width: 2; stroke-linecap: round; }
+
+  /* ===== 密码生成器（底部抽屉） ===== */
+  .gen-overlay { position: absolute; inset: 0; z-index: 93; display: flex; align-items: flex-end; background: rgba(0,0,0,.4); opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .gen-overlay.show { opacity: 1; pointer-events: auto; }
+  .gen { width: 100%; border-radius: 24px 24px 0 0; background: rgba(26,28,36,.92); backdrop-filter: blur(50px) saturate(2); -webkit-backdrop-filter: blur(50px) saturate(2); border-top: 0.7px solid rgba(255,255,255,.18); box-shadow: 0 -20px 60px rgba(0,0,0,.55); padding: 18px 18px 30px; transform: translateY(100%); transition: transform .36s cubic-bezier(.32,.72,0,1); }
+  .gen-overlay.show .gen { transform: none; }
+  .gen .gh { width: 36px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.2); margin: 0 auto 14px; }
+  .gen .gcode { font-family: 'SF Mono', ui-monospace, monospace; font-size: 19px; font-weight: 700; letter-spacing: 1.6px; text-align: center; color: #64D2FF; text-shadow: 0 0 20px rgba(100,210,255,.4); word-break: break-all; padding: 10px 4px; }
+  .gen .gopt { display: flex; align-items: center; justify-content: space-between; padding: 11px 4px; font-size: 14px; border-top: 0.5px solid rgba(255,255,255,.07); }
+  .gen .gopt .gl { color: rgba(255,255,255,.8); }
+  .gen .gbtns { display: flex; gap: 10px; margin-top: 16px; }
+  .gen .gbtn { flex: 1; padding: 13px; border-radius: 14px; text-align: center; font-size: 14.5px; font-weight: 700; cursor: pointer; transition: transform .15s; }
+  .gen .gbtn.pri { background: linear-gradient(135deg, rgba(100,210,255,.9), rgba(10,132,255,.85)); box-shadow: 0 8px 22px rgba(10,132,255,.35), inset 0 1px 0 rgba(255,255,255,.4); }
+  .gen .gbtn.sec { background: rgba(255,255,255,.1); border: 0.5px solid rgba(255,255,255,.16); }
+  .gen .gbtn:active { transform: scale(.97); }
+
+  /* 开关 */
+  .sw { width: 44px; height: 27px; border-radius: 14px; background: rgba(255,255,255,.18); position: relative; cursor: pointer; transition: background .2s; flex-shrink: 0; }
+  .sw::after { content: ""; position: absolute; top: 2.5px; left: 2.5px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.35); transition: transform .22s cubic-bezier(.3,1.3,.5,1); }
+  .sw.on { background: #30D158; }
+  .sw.on::after { transform: translateX(17px); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tb-slot, .tb-gap, .content { transition: none; }
+    .tb-pill .disp, .tb-pill::before, .tb-pill::after { transition: none; }
+  }
+  /* =====================================================================
+     iOS 标准化清理：去多余框条（2026-09-12）
+     原则：① 列表块纯填充无描边无阴影（iOS inset grouped list）
+          ② 分隔线左缩进到行内容起点（iOS 标准 inset separator）
+          ③ 按钮/输入框去描边，靠填充和间距区分层次
+     ===================================================================== */
+
+  /* ① 列表块与卡片：纯填充 + 毛玻璃，无描边无投影 */
+  .card, .totp-card, .tag-card, .group { border: none; box-shadow: none; background: rgba(255,255,255,.085); }
+  .card:hover, .totp-card:hover, .tag-card:hover { background: rgba(255,255,255,.12); }
+
+  /* ② 各类控件去描边（按钮/输入/胶囊/抽屉/底栏） */
+  .search, .search-btn, .search-modal, .chip, .danger, .toast, .screen .nav .back,
+  .gen, .gen .gbtn.sec, .tb-gap .fab, .drow .cp, .drow .vi, .field .mini, .sw,
+  .lock .faceid .fbtn { border: none; }
+  .search, .search-btn, .chip, .screen .nav .back, .danger { box-shadow: none; }
+  .drow .cp, .field .mini { background: rgba(100,210,255,.18); }
+
+  /* ③ 分隔线：iOS 标准左缩进（从行内容起点开始），去掉全宽通线 */
+  .row + .row, .drow + .drow, .field + .field { border-top: none; position: relative; }
+  .row + .row::before, .drow + .drow::before, .field + .field::before {
+    content: ''; position: absolute; top: 0; left: 14px; right: 0; height: .5px;
+    background: rgba(255,255,255,.07); pointer-events: none;
+  }
+  .drow + .drow::before { left: 15px; }
+  .gen .gopt { border-top: none; }
+
+  /* ④ 底栏：去掉彩虹描边（彩色圈=多余框条），保留玻璃反光层 */
+  .tb-pill .disp { display: none; }
+  #tabbar::before { box-shadow: inset 0 1px 0 rgba(255,255,255,.1); }
+  #tabbar::after { box-shadow: inset 0 -24px 48px -32px rgba(120,180,255,.16); }
+
+  /* ⑤ 图标块：只保留一层顶部高光 */
+  .card .ico, .totp-card .ico, .dhero .bigico { box-shadow: inset 0 1px 0 rgba(255,255,255,.2); }
+
+  /* ⑦ 布局标准化：大标题与内容左对齐、分类可横向滚动、行尾按钮改纯图标（iOS 风格） */
+  .title { margin-left: 0; margin-right: 0; }
+  .chips { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .chips::-webkit-scrollbar { display: none; }
+  .drow .cp, .drow .vi { background: transparent; width: 30px; height: 30px; border-radius: 8px; }
+  .drow .cp svg { stroke: #64D2FF; }
+  .drow .vi svg { stroke: rgba(255,255,255,.5); }
+  .drow .cp:active, .drow .vi:active { background: rgba(255,255,255,.1); }
+
+  /* ⑧ Home Indicator（iOS 标准底部小白条） */
+  .home-bar {
+    position: absolute; bottom: 6px; left: 50%; transform: translateX(-50%);
+    width: 128px; height: 5px; border-radius: 3px;
+    background: rgba(255,255,255,.42); z-index: 65; pointer-events: none;
+  }
+
+  /* ⑨ 胶囊边缘高光减弱（保留玻璃质感，但不做"框"） */
+  .tb-pill { border-color: rgba(255,255,255,.22); }
+  .lock .pwwrap { border-color: rgba(255,255,255,.12); }
+
+  /* ⑪ 修复：flex 子项必须 min-height:0 才能让 overflow 生效（否则内容撑开被裁剪、滚不动） */
+  .screen .body { min-height: 0; }
+
+  /* =====================================================================
+     锁屏完善：密码显隐 / Face ID 分支按钮 / 临时锁定
+     ===================================================================== */
+  .lock .pwwrap .pw-eye { width: 26px; height: 26px; flex-shrink: 0; border: none; background: none; color: rgba(255,255,255,.45); display: flex; align-items: center; justify-content: center; cursor: pointer; border-radius: 7px; padding: 0; transition: color .2s, background .2s; }
+  .lock .pwwrap .pw-eye:hover { background: rgba(255,255,255,.1); color: rgba(255,255,255,.85); }
+  .lock .pwwrap .pw-eye svg { width: 15px; height: 15px; }
+  .lock .pwwrap.locked { opacity: .5; }
+  .lock .pwwrap.locked input { cursor: not-allowed; }
+  .lock .face-actions { display: flex; gap: 8px; opacity: 0; height: 0; overflow: hidden; transition: opacity .28s ease, height .28s cubic-bezier(.3,1,.4,1), margin-top .28s; }
+  .lock .faceid.show-actions .face-actions { opacity: 1; height: 34px; margin-top: 5px; }
+  .lock .face-actions button { border: none; font-family: inherit; font-size: 12.5px; font-weight: 600; color: #64D2FF; background: rgba(100,210,255,.15); padding: 8px 15px; border-radius: 999px; cursor: pointer; white-space: nowrap; transition: transform .15s, background .2s; }
+  .lock .face-actions button:hover { background: rgba(100,210,255,.24); }
+  .lock .face-actions button:active { transform: scale(.94); }
+  .lock .face-actions button:last-child { color: rgba(255,255,255,.78); background: rgba(255,255,255,.11); }
+  .lock .face-actions button:last-child:hover { background: rgba(255,255,255,.17); }
+
+  /* --- 首次设置主密码模式 --- */
+  .lock.mode-setup .unlockbox { display: none; }
+  .lock.mode-unlock .setupbox { display: none; }
+  .lock .setupbox { display: flex; flex-direction: column; align-items: center; gap: 9px; width: 100%; max-width: 260px; }
+  .lock .setupbox .pwwrap { width: 100%; }
+  /* 解锁模式容器：与设置模式同宽同布局，保证密码框水平居中一致 */
+  .lock .unlockbox { display: flex; flex-direction: column; align-items: center; gap: 9px; width: 100%; max-width: 260px; }
+  .lock .unlockbox .pwwrap { width: 100%; margin-top: 0; }
+  .lock .setupbox .lockmsg { min-height: 18px; }
+  .lock .faceopt { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin-top: 4px; padding: 10px 12px; background: rgba(255,255,255,.05); border: 0.5px solid rgba(255,255,255,.1); border-radius: 11px; }
+  .lock .faceopt .fo-txt { display: flex; flex-direction: column; gap: 2px; text-align: left; }
+  .lock .faceopt .fo-label { font-size: 13px; font-weight: 500; color: rgba(255,255,255,.88); }
+  .lock .faceopt .fo-sub { font-size: 10.5px; color: rgba(255,255,255,.4); }
+  /* iOS 风格开关 */
+  .ios-switch { width: 40px; height: 24px; border-radius: 999px; border: none; background: rgba(255,255,255,.16); position: relative; cursor: pointer; flex-shrink: 0; padding: 0; transition: background .25s; }
+  .ios-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.3); transition: transform .25s cubic-bezier(.3,1,.4,1); }
+  .ios-switch.on { background: #34C759; }
+  .ios-switch.on::after { transform: translateX(16px); }
+
+  /* ===== Face ID 录入（真实摄像头） ===== */
+  .facemodal { position: absolute; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(10,10,14,.74); backdrop-filter: blur(24px) saturate(1.4); -webkit-backdrop-filter: blur(24px) saturate(1.4); }
+  .facemodal.show { display: flex; }
+  .fm-box { width: 300px; display: flex; flex-direction: column; align-items: center; gap: 11px; text-align: center; }
+  .fm-title { font-size: 19px; font-weight: 700; color: #fff; }
+  .fm-sub { font-size: 12.5px; color: rgba(255,255,255,.55); line-height: 1.5; }
+  .cam-wrap { position: relative; width: 200px; height: 200px; border-radius: 50%; overflow: hidden; background: #000; margin: 4px 0; box-shadow: 0 0 0 2px rgba(100,210,255,.35), 0 12px 40px rgba(0,0,0,.5); }
+  .cam-wrap video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  .scan-corner { position: absolute; width: 24px; height: 24px; border: 3px solid rgba(100,210,255,.85); pointer-events: none; }
+  .scan-corner.tl { top: 10px; left: 10px; border-right: none; border-bottom: none; border-top-left-radius: 12px; }
+  .scan-corner.tr { top: 10px; right: 10px; border-left: none; border-bottom: none; border-top-right-radius: 12px; }
+  .scan-corner.bl { bottom: 10px; left: 10px; border-right: none; border-top: none; border-bottom-left-radius: 12px; }
+  .scan-corner.br { bottom: 10px; right: 10px; border-left: none; border-top: none; border-bottom-right-radius: 12px; }
+  .scanbar { position: absolute; left: 12px; right: 12px; height: 2px; border-radius: 2px; background: linear-gradient(90deg, transparent, rgba(100,210,255,.9), transparent); animation: scanMove 2.2s ease-in-out infinite; pointer-events: none; }
+  @keyframes scanMove { 0%, 100% { top: 18px; opacity: .9; } 50% { top: 178px; opacity: .5; } }
+  .cam-wrap.ok .scan-corner { border-color: #34C759; }
+  .cam-wrap.ok .scanbar { display: none; }
+  .fm-status { font-size: 13px; color: rgba(255,255,255,.72); min-height: 18px; transition: color .25s; }
+  .fm-status.ok { color: #34C759; font-weight: 600; }
+  .fm-status.err { color: #FF453A; }
+  .fm-actions { display: flex; gap: 10px; margin-top: 3px; }
+  .fm-btn { border: none; font-family: inherit; font-size: 13.5px; font-weight: 600; color: rgba(255,255,255,.85); background: rgba(255,255,255,.12); padding: 10px 20px; border-radius: 999px; cursor: pointer; transition: transform .15s, background .2s; }
+  .fm-btn:active { transform: scale(.94); }
+  .fm-btn.primary { color: #64D2FF; background: rgba(100,210,255,.16); }
+  .fm-btn.primary:hover { background: rgba(100,210,255,.26); }
+
+  /* 锁屏人脸圆钮里的摄像头预览 */
+  .lock .fbtn { position: relative; overflow: hidden; }
+  .lock .fbtn .face-cam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; transform: scaleX(-1); opacity: 0; transition: opacity .3s ease; }
+  .lock .fbtn.cam-on .face-cam { opacity: 1; }
+  .lock .fbtn.cam-on .ic-face { opacity: 0; }
+
+  /* =====================================================================
+     标签系统：chips 滑块 / 标签卡图标 / 图标选择网格 / 编辑入口
+     ===================================================================== */
+  /* chips 两端：没完全显示的标签带一点模糊（iOS 式边缘过渡） */
+  .chips-rail { position: relative; margin-bottom: 10px; }
+  .chips-rail .chips { margin-bottom: 0; }
+  .chips-rail::before, .chips-rail::after {
+    content: ''; position: absolute; top: 0; bottom: 0; width: 24px; z-index: 3; pointer-events: none;
+    backdrop-filter: blur(7px); -webkit-backdrop-filter: blur(7px);
+    opacity: 0; transition: opacity .22s ease;
+  }
+  .chips-rail::before { left: 0; -webkit-mask-image: linear-gradient(90deg, #000 30%, transparent); mask-image: linear-gradient(90deg, #000 30%, transparent); }
+  .chips-rail::after { right: 0; -webkit-mask-image: linear-gradient(270deg, #000 30%, transparent); mask-image: linear-gradient(270deg, #000 30%, transparent); }
+  .chips-rail.edge-l::before { opacity: 1; }
+  .chips-rail.edge-r::after { opacity: 1; }
+
+  /* chips 可横向滑动（隐藏滚动条 + 惯性），选中自动滚到中间 */
+  .chips { overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; scroll-behavior: smooth; cursor: default; }
+  .chips::-webkit-scrollbar { display: none; }
+  /* ⚠️ 重做版：dragging 只影响"光标 + 滚动行为"，绝不碰 pointer-events
+     （旧版在这里写 .chips.dragging .chip { pointer-events: none }，导致拖动/惯性期间整个标签栏点不动） */
+  .chips.dragging { cursor: grabbing; scroll-behavior: auto; }
+  /* 防整页横向滚动：chips 自动居中只应滚自身，不能把页面推走 */
+  html, body { overflow-x: hidden; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+  .chip svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
+  .chip.on svg { opacity: 1; }
+
+  /* 标签页卡片内的图标 / 固定标记 / 编辑按钮 / 新建入口 */
+  .tag-ic { width: 34px; height: 34px; border-radius: 10px; background: rgba(255,255,255,.07); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .tag-ic svg { width: 17px; height: 17px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .tag-fixed { font-size: 10.5px; color: rgba(255,255,255,.32); background: rgba(255,255,255,.07); padding: 3px 8px; border-radius: 999px; flex-shrink: 0; }
+  .tag-edit { width: 28px; height: 28px; border-radius: 50%; border: none; background: rgba(255,255,255,.08); color: rgba(255,255,255,.6); display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; padding: 0; transition: background .2s, transform .15s; }
+  .tag-edit:hover { background: rgba(255,255,255,.14); color: #fff; }
+  .tag-edit:active { transform: scale(.9); }
+  .tag-edit svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .tag-add { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 14px; margin-top: 4px; border-radius: 14px; background: rgba(255,255,255,.04); color: #64D2FF; font-size: 13.5px; font-weight: 500; cursor: pointer; transition: background .2s, transform .15s; }
+  .tag-add:hover { background: rgba(100,210,255,.1); }
+  .tag-add:active { transform: scale(.985); }
+  .tag-add svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* 图标选择网格（标签编辑页） */
+  .icon-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-top: 4px; }
+  .icon-cell { aspect-ratio: 1; border-radius: 11px; background: rgba(255,255,255,.06); display: flex; align-items: center; justify-content: center; cursor: pointer; border: 1.5px solid transparent; transition: background .2s, transform .15s, border-color .2s; }
+  .icon-cell svg { width: 20px; height: 20px; stroke: rgba(255,255,255,.72); fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-cell:hover { background: rgba(255,255,255,.11); }
+  .icon-cell:active { transform: scale(.92); }
+  .icon-cell.sel { background: rgba(100,210,255,.16); border-color: rgba(100,210,255,.55); }
+  .icon-cell.sel svg { stroke: #64D2FF; }
+  /* 颜色表（标签编辑页）—— 12 色圆形色块，选中带白圈 */
+  .color-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-top: 6px; padding: 2px; }
+  .color-cell { position: relative; aspect-ratio: 1; border-radius: 50%; display: grid; place-items: center; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .color-cell i { display: block; width: 100%; height: 100%; border-radius: 50%; background: var(--cc); box-shadow: inset 0 0 0 .5px rgba(255,255,255,.2); transition: transform .16s cubic-bezier(.34,1.56,.64,1); }
+  .color-cell:active i { transform: scale(.88); }
+  .color-cell.sel i { transform: scale(1.04); }
+  .color-cell.sel::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 2px solid rgba(255,255,255,.9); }
+  /* chip 图标跟随标签自定义色；选中态保持白色保证可读 */
+  .chip .chip-ic { display: inline-flex; color: var(--tc); }
+  .chip.on .chip-ic { color: #fff; }
+
+  /* 壁纸预览 + 内置壁纸网格（设置 → 更改壁纸） */
+  .wall-preview { height: 150px; border-radius: 14px; background: rgba(255,255,255,.05) center/cover no-repeat; border: .5px solid rgba(255,255,255,.1); margin-bottom: 10px; display: grid; place-items: center; color: rgba(255,255,255,.3); font-size: 12px; }
+  .wall-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 6px; }
+  .wall-thumb { position: relative; overflow: hidden; aspect-ratio: 9 / 16; border-radius: 10px; background: rgba(255,255,255,.06) center/cover no-repeat; cursor: pointer; border: 1.5px solid transparent; transition: transform .16s, border-color .16s; }
+  .wall-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .wall-thumb:active { transform: scale(.95); }
+  .wall-thumb.sel { border-color: rgba(100,210,255,.85); }
+  .wall-thumb.sel::after { content: '✓'; position: absolute; right: 5px; bottom: 5px; width: 18px; height: 18px; border-radius: 50%; background: #0A84FF; color: #fff; font-size: 11px; display: grid; place-items: center; }
+
+  /* ===== 壁纸裁剪框（上传后拖动 / 缩放调整） ===== */
+  .crop-overlay { position: absolute; inset: 0; z-index: 95; background: rgba(0,0,0,.75); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity .24s; }
+  .crop-overlay.show { opacity: 1; pointer-events: auto; }
+  .crop-panel { width: 292px; background: rgba(28,30,38,.95); border-radius: 24px; padding: 16px; border: .6px solid rgba(255,255,255,.18); box-shadow: 0 24px 60px rgba(0,0,0,.65); display: flex; flex-direction: column; gap: 11px; }
+  .crop-head { font-size: 15px; font-weight: 600; text-align: center; color: #fff; }
+  .crop-sub { font-size: 11.5px; text-align: center; color: rgba(255,255,255,.45); margin-top: -6px; }
+  .crop-stage { position: relative; width: 100%; aspect-ratio: 340 / 690; border-radius: 16px; overflow: hidden; background: #000; touch-action: none; cursor: grab; }
+  .crop-stage:active { cursor: grabbing; }
+  .crop-stage img { position: absolute; left: 0; top: 0; max-width: none; transform-origin: 0 0; pointer-events: none; user-select: none; -webkit-user-drag: none; }
+  .crop-frame { position: absolute; inset: 0; border-radius: 16px; box-shadow: inset 0 0 0 2px rgba(255,255,255,.5); pointer-events: none; }
+  .crop-zoom { display: flex; align-items: center; gap: 8px; }
+  .crop-zoom svg { width: 17px; height: 17px; stroke: rgba(255,255,255,.55); flex-shrink: 0; }
+  .crop-zoom .slider { flex: 1; margin: 0; }
+  .crop-btns { display: flex; gap: 8px; margin-top: 2px; }
+  .cbtn { flex: 1; text-align: center; padding: 11px 6px; border-radius: 13px; font-size: 13.5px; font-weight: 600; cursor: pointer; transition: transform .14s, background .2s; }
+  .cbtn:active { transform: scale(.96); }
+  .cbtn.pri { background: linear-gradient(135deg, rgba(100,210,255,.95), rgba(10,132,255,.92)); color: #fff; flex: 1.3; }
+  .cbtn.sec { background: rgba(255,255,255,.1); color: rgba(255,255,255,.78); }
+
+  /* 滑块（TOTP 时间偏移） */
+  .slider { -webkit-appearance: none; appearance: none; width: 100%; height: 32px; background: transparent; margin: 6px 0 0; }
+  .slider::-webkit-slider-runnable-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,.14); }
+  .slider::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; border-radius: 50%; background: #fff; margin-top: -9px; box-shadow: 0 2px 8px rgba(0,0,0,.4); cursor: pointer; }
+  .slider-marks { display: flex; justify-content: space-between; font-size: 11px; color: rgba(255,255,255,.4); padding: 0 2px; }
+
+  /* ===== 更透明的玻璃：降低"白雾"、减轻模糊，让壁纸若隐若现 ===== */
+  .card, .totp-card, .tag-card, .group, .search, .search-btn, .screen .nav .back,
+  .chips .chip, .lock .pwwrap, .lock .faceid .fbtn, .drow {
+    background:
+      linear-gradient(rgba(var(--tint), .09), rgba(var(--tint), .09)),
+      rgba(255,255,255,.045);
+    backdrop-filter: blur(18px) saturate(2);
+    -webkit-backdrop-filter: blur(18px) saturate(2);
+  }
+  .chip.on { background: linear-gradient(135deg, rgba(100,210,255,.9), rgba(10,132,255,.85)); }   /* 选中态保持品牌色 */
+  .search-modal, .gen, .toast { background: rgba(28,30,38,.88); }   /* 深色浮层不染色（保证文字可读） */
+
+  /* GitHub 备份使用教程 */
+  .tut { display: flex; flex-direction: column; gap: 9px; margin-top: 6px; }
+  .tut-step { display: flex; gap: 10px; padding: 11px 13px; border-radius: 13px; background: rgba(255,255,255,.055); border: .5px solid rgba(255,255,255,.09); font-size: 12.5px; line-height: 1.6; color: rgba(255,255,255,.72); }
+  .tut-step > b:first-child { flex-shrink: 0; width: 20px; height: 20px; border-radius: 50%; background: rgba(100,210,255,.18); color: #64D2FF; display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+  .tut-step span b { color: rgba(255,255,255,.92); font-weight: 600; }
+  .tut-step code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; padding: 1px 5px; border-radius: 5px; background: rgba(255,255,255,.1); color: #64D2FF; }
+
+  /* 删除标签行 */
+  .del-row { margin-top: 10px; padding: 14px; border-radius: 14px; background: rgba(255,69,58,.1); color: #FF6961; text-align: center; font-size: 14px; font-weight: 500; cursor: pointer; transition: background .2s, transform .15s; }
+  .del-row:hover { background: rgba(255,69,58,.16); }
+  .del-row:active { transform: scale(.985); }
+
+  /* ⑩ 密码库卡片验证码（实时刷新 + 到期变橙） */
+  .mtotp { display: flex; align-items: center; gap: 7px; flex-shrink: 0; }
+  .mcode { font-size: 16px; font-weight: 700; letter-spacing: 1.5px; color: #64D2FF; font-family: 'SF Mono', ui-monospace, monospace; transition: color .35s; }
+  .mcode.expiring { color: #FF9F0A; }
+  .mring .mbar { transition: stroke .35s; }
+  .mring.expiring .mbar { stroke: #FF9F0A; }
+  /* 自定义图标（卡片 / 详情页） */
+  .card .ico img, .dhero .bigico img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+
+  /* ===== 毛玻璃性能 ===== */
+  /* 玻璃元素提升为独立合成层：切换页面/重绘时复用已算好的模糊纹理，不再"重新加载" */
+  .card, .totp-card, .tag-card, .group, .search, .chip, .sheet .gen {
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  /* =====================================================================
+     编辑页（对标 PC 端 EntryModal 全部字段）
+     ===================================================================== */
+  #editorScreen .body { padding: 0 16px 30px; overflow-y: auto; scrollbar-width: none; }
+  #editorScreen .body::-webkit-scrollbar { display: none; }
+
+  /* 详情页滚动条改为可见细条（隐藏式滚动条会让用户以为不能滚） */
+  #detailScreen .body { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.25) transparent; padding-bottom: 22px; }
+  #detailScreen .body::-webkit-scrollbar { display: block; width: 5px; }
+  #detailScreen .body::-webkit-scrollbar-track { background: transparent; }
+  #detailScreen .body::-webkit-scrollbar-thumb { background: rgba(255,255,255,.25); border-radius: 3px; }
+  #detailScreen .body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.4); }
+  /* 详情/编辑页：触摸设备也能滑动（iOS 惯性滚动） */
+  .screen .body { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  .ehd { display: flex; align-items: flex-end; gap: 10px; margin: 8px 0 0; }
+  .eico { width: 52px; height: 52px; border-radius: 14px; flex-shrink: 0; background: rgba(255,255,255,.08); border: 1px dashed rgba(255,255,255,.22); display: flex; align-items: center; justify-content: center; cursor: pointer; overflow: hidden; padding: 0; color: rgba(255,255,255,.45); transition: border-color .2s, background .2s; }
+  .eico:hover { border-color: rgba(100,210,255,.6); background: rgba(100,210,255,.08); }
+  .eico img { width: 100%; height: 100%; object-fit: cover; }
+  .eico svg { width: 20px; height: 20px; }
+  .etwrap { flex: 1; min-width: 0; }
+  .elab { display: block; font-size: 11.5px; color: rgba(255,255,255,.45); margin-bottom: 5px; letter-spacing: .2px; }
+  .einput { width: 100%; background: rgba(255,255,255,.08); border: none; outline: none; border-radius: 11px; padding: 10px 12px; color: #fff; font-size: 14px; font-family: inherit; transition: background .2s; }
+  .einput:focus { background: rgba(255,255,255,.13); }
+  .einput::placeholder { color: rgba(255,255,255,.3); }
+  .efav { width: 42px; height: 42px; flex-shrink: 0; border-radius: 12px; border: none; background: rgba(255,255,255,.08); color: rgba(255,255,255,.35); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .2s; }
+  .efav svg { width: 19px; height: 19px; }
+  .efav.on { background: rgba(255,214,10,.16); color: #FFD60A; }
+  .efav.on svg { fill: #FFD60A; }
+  .ehint2 { font-size: 11px; color: rgba(255,255,255,.32); margin: 6px 2px 0; }
+  .ef { margin-top: 16px; }
+  .epw { display: flex; gap: 7px; align-items: center; }
+  .epw .einput { flex: 1; min-width: 0; }
+  .emini { width: 34px; height: 34px; flex-shrink: 0; border-radius: 10px; border: none; background: rgba(100,210,255,.14); color: #64D2FF; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform .15s, background .2s; }
+  .emini svg { width: 15px; height: 15px; }
+  .emini:active { transform: scale(.93); }
+  .estr { display: flex; align-items: center; gap: 9px; margin-top: 9px; }
+  .estr .sbar { flex: 1; }
+  .eslabel { font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+  .esite { display: flex; gap: 7px; align-items: center; }
+  .esite .einput { flex: 1; min-width: 0; }
+  .efetch { flex-shrink: 0; padding: 10px 13px; border-radius: 11px; border: none; background: rgba(100,210,255,.16); color: #64D2FF; font-size: 12.5px; font-weight: 600; font-family: inherit; cursor: pointer; transition: transform .15s; }
+  .efetch:active { transform: scale(.95); }
+  .epick { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip2 { padding: 7px 13px; border-radius: 999px; border: none; font-size: 12.5px; font-weight: 600; font-family: inherit; color: rgba(255,255,255,.55); background: rgba(255,255,255,.09); cursor: pointer; transition: all .2s; }
+  .chip2.on { color: #fff; background: linear-gradient(135deg, rgba(100,210,255,.9), rgba(10,132,255,.85)); box-shadow: 0 4px 12px rgba(10,132,255,.3); }
+  .etextarea { width: 100%; background: rgba(255,255,255,.08); border: none; outline: none; border-radius: 11px; padding: 10px 12px; color: #fff; font-size: 13.5px; font-family: inherit; resize: none; line-height: 1.5; }
+  .etextarea::placeholder { color: rgba(255,255,255,.3); }
+  .elabrow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .eadd { border: none; background: rgba(100,210,255,.16); color: #64D2FF; font-size: 12px; font-weight: 600; font-family: inherit; padding: 5px 11px; border-radius: 999px; cursor: pointer; }
+  .ecustom { display: flex; flex-direction: column; gap: 8px; }
+  .ecrow { display: flex; gap: 6px; align-items: center; }
+  .ecrow .einput { padding: 9px 11px; font-size: 12.5px; }
+  .ecrow .k { flex: 1; min-width: 0; }
+  .ecrow .v { flex: 1.3; min-width: 0; }
+  .ecdel { width: 30px; height: 30px; flex-shrink: 0; border-radius: 9px; border: none; background: rgba(255,69,58,.14); color: #FF6961; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .ecdel svg { width: 13px; height: 13px; }
+  .eattach { width: 100%; padding: 11px; border-radius: 12px; border: 1px dashed rgba(255,255,255,.25); background: none; color: rgba(255,255,255,.55); font-size: 12.5px; font-family: inherit; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all .2s; }
+  .eattach:hover { border-color: rgba(100,210,255,.6); color: #64D2FF; }
+  .eattachlist { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .eatt { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-radius: 11px; background: rgba(255,255,255,.06); font-size: 12px; color: rgba(255,255,255,.6); }
+  .eatt .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .egbtns { display: flex; gap: 10px; margin: 24px 0 10px; }
+  .egbtn { flex: 1; padding: 13px; border-radius: 14px; border: none; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; transition: transform .15s; }
+  .egbtn:active { transform: scale(.97); }
+  .egbtn.cancel { background: rgba(255,255,255,.1); color: rgba(255,255,255,.75); }
+  .egbtn.save { background: linear-gradient(135deg, rgba(100,210,255,.9), rgba(10,132,255,.85)); color: #fff; box-shadow: 0 8px 22px rgba(10,132,255,.35); }
+
+  /* ⑪ 详情页/编辑页滚动修复：flex 列容器里子项不压缩，超出即可滚动 */
+  .screen .body > * { flex-shrink: 0; }
+  /* 标签胶囊（详情页） */
+  .tagdot { padding: 5px 12px; border-radius: 999px; font-size: 11.5px; font-weight: 700; color: #15161c; }
+
+  /* =====================================================================
+     卡片左滑操作（圆形图标按钮：删除 / 收藏 / 编辑）
+     · 按钮层用 width 裁切：只显示卡片已让出的区域 → 玻璃卡片下不会透色
+     · 卡片一移动按钮就跟随出现（不需要拖过一半）
+     · 圆形按钮 + 图标，尺寸小
+     ===================================================================== */
+  .swipe-wrap { position: relative; border-radius: 16px; overflow: hidden; }
+  .swipe-actions {
+    position: absolute; top: 0; bottom: 0; right: 0; width: 0;
+    overflow: hidden; display: flex; align-items: center; justify-content: flex-end;
+    gap: 7px; padding-right: 6px;
+  }
+  .sw-btn {
+    width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0;
+    border: none; display: flex; align-items: center; justify-content: center;
+    color: #fff; cursor: pointer; transition: filter .15s, transform .15s;
+  }
+  .sw-btn:active { transform: scale(.9); filter: brightness(.9); }
+  .sw-btn svg { width: 17px; height: 17px; }
+  .sw-del { background: #FF453A; }
+  .sw-fav { background: #FF9F0A; }
+  .sw-edit { background: #0A84FF; }
+  .swipe-wrap .card { position: relative; z-index: 1; touch-action: pan-y; will-change: transform; }
+
+  /* 按钮弹入：每个按钮"完整露出"的那一刻单独弹一次（由 JS 按露出进度加 .pop） */
+  @keyframes btnPop {
+    0%   { transform: scale(.7); }
+    60%  { transform: scale(1.13); }
+    100% { transform: scale(1); }
+  }
+  @keyframes iconIn {
+    from { opacity: .3; transform: rotate(-14deg) scale(.8); }
+    to   { opacity: 1; transform: none; }
+  }
+  .sw-btn.pop { animation: btnPop .44s cubic-bezier(.34,1.56,.64,1) both; }
+  .sw-btn.pop svg { animation: iconIn .4s cubic-bezier(.34,1.4,.64,1) both; }
+
+  /* =====================================================================
+     分类切换动画（密码库）
+     ① 胶囊：点按弹性回弹（pop）
+     ② 卡片：FLIP 平滑位移（留下的滑到新位置）+ 交错入场（新出现的）
+     ===================================================================== */
+  @keyframes chipPop {
+    0%   { transform: scale(1); }
+    45%  { transform: scale(.92); }
+    75%  { transform: scale(1.05); }
+    100% { transform: scale(1); }
+  }
+  @keyframes cardIn {
+    from { opacity: 0; transform: translateY(14px) scale(.965); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes emptyIn {
+    from { opacity: 0; transform: scale(.94); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  .chip.pop { animation: chipPop .42s cubic-bezier(.34,1.56,.64,1); }
+  .card.enter { animation: cardIn .34s cubic-bezier(.22,1,.36,1) both; }
+  .empty.enter { animation: emptyIn .32s cubic-bezier(.22,1,.36,1) both; }
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <h2>多页原型 · 密码库/验证码/标签/设置</h2>
+  <p>👇 点底栏切换页面 —— 验证码页：大号验证码 + 倒计时圆环 + 点击复制</p>
+</div>
+
+<div class="phone" id="phone">
+  <div class="island"></div>
+  <div class="status">
+    <span>9:41</span>
+    <span class="r">
+      <svg viewBox="0 0 24 14"><rect x="0" y="3" width="16" height="10" rx="2.5" fill="none" stroke="currentColor"/><rect x="2" y="5" width="9" height="6" rx="1" fill="currentColor"/><rect x="19" y="5" width="2.5" height="4" rx="1" fill="currentColor"/></svg>
+      <svg viewBox="0 0 24 14"><path d="M2 10 a9 9 0 0 1 15 0" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M6 10 a5 5 0 0 1 7 0" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><circle cx="9.5" cy="10" r="1.4" fill="currentColor"/></svg>
+    </span>
+  </div>
+
+  <!-- ===== 页面 1：密码库 ===== -->
+  <div class="content active" id="page-vault">
+    <div class="title-row">
+      <div class="title">密码库</div>
+      <button class="search-btn" onclick="openSearch()" aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+    </div>
+    <!-- 分段切换：密码 | 卡片（照 Figma：246×51 圆角21） -->
+    <div class="vseg" id="vseg">
+      <div class="vseg-slider" id="vsegSlider"></div>
+      <div class="vseg-item on" id="vsegPw" onclick="switchVault('pw')" ontouchstart="switchVault('pw')">密码</div>
+      <div class="vseg-item" id="vsegCard" onclick="switchVault('card')" ontouchstart="switchVault('card')">卡片</div>
+    </div>
+    <div class="search" id="vaultSearch" style="display:none" onclick="openSearch()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><span>搜索账号、网站、分类…</span></div>
+    <div class="chips-rail" id="vaultChipsRail">
+      <div class="chips" id="vaultChips"></div>
+    </div>
+    <div class="list" id="list"></div>
+    <div class="vs-track" id="vscL"><div class="vs-thumb"></div></div>
+    <!-- 卡片视图：上下滑动切换的银行卡画廊 -->
+    <div id="bankView">
+      <div class="bank-stage" id="bankStage"></div>
+    </div>
+  </div>
+
+  <!-- ===== 页面 2：验证码 ===== -->
+  <div class="content" id="page-totp">
+    <div class="title-row">
+      <div class="title">验证码</div>
+      <button class="search-btn" onclick="openSearch()" aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+    </div>
+    <div class="totp-hint">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+      点击卡片复制验证码
+    </div>
+    <div class="list" id="totpList"></div>
+    <div class="vs-track" id="vscT"><div class="vs-thumb"></div></div>
+  </div>
+
+  <!-- ===== 页面 3：标签 ===== -->
+  <div class="content" id="page-tags">
+    <div class="title-row">
+      <div class="title">标签</div>
+
+    </div>
+    <div class="list" id="tagList"></div>
+  </div>
+
+  <!-- ===== 页面 4：设置 ===== -->
+  <div class="content" id="page-settings">
+    <div class="title-row">
+      <div class="title">设置</div>
+      <button class="search-btn" onclick="openSearch()" aria-label="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></button>
+    </div>
+    <div class="list" id="settingsList">
+      <div class="sec-title">安全</div>
+      <div class="group">
+        <div class="row" onclick="openChpw()"><svg class="ri" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg><span class="k">修改主密码</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="row" onclick="lockNow()"><svg class="ri" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg><span class="k">锁定应用</span><span class="v">立即锁定</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="row" id="faceSetRow" onclick="toggleFaceId()"><svg class="ri" viewBox="0 0 24 24"><path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12c0-.7.12-1.37.34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/></svg><span class="k">Face ID 解锁</span><span class="v" id="faceIdState">已关闭</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+      </div>
+
+      <div class="sec-title">数据</div>
+      <div class="group">
+        <div class="row" onclick="openExport()"><svg class="ri" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg><span class="k">加密备份</span><span class="v" id="exportHint">.fvault</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="row" onclick="openRestore()"><svg class="ri" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg><span class="k">恢复备份</span><span class="v" id="restoreHint">选择 .fvault</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="row" onclick="openTotpIO()"><svg class="ri" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 12h8"/><path d="M12 8v8"/></svg><span class="k">TOTP 导出 / 导入</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="row" onclick="openBackup()"><svg class="ri" viewBox="0 0 24 24"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg><span class="k">GitHub 备份</span><span class="v">已加密</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+      </div>
+
+      <div class="sec-title">外观</div>
+      <div class="group">
+        <div class="row" onclick="openWall()"><svg class="ri" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg><span class="k">更改壁纸</span><span class="v" id="wallHint">默认</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+      </div>
+
+      <div class="sec-title">高级</div>
+      <div class="group">
+        <div class="row" onclick="openTotpOffset()"><svg class="ri" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/><path d="M2 12h2"/><path d="M20 12h2"/></svg><span class="k">TOTP 时间偏移校正</span><span class="v" id="totpOffsetHint">0 秒</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></div>
+      </div>
+
+      <div class="sec-title">关于</div>
+      <div class="group">
+        <div class="row"><svg class="ri" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg><span class="k">版本</span><span class="v">1.0.0 (iOS)</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tabbar"></div>
+
+  <!-- + 号独立层（Figma：57px 灰圆骑缺口，三瓣扇叶 37px 弧形弹出） -->
+  <div class="fab-outer" id="fabOuter">
+    <div class="fab-act a1" onclick="fabNew3('tag')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2H2v10l9.29 9.29a1 1 0 0 0 1.42 0l8.58-8.58a1 1 0 0 0 0-1.42z"/><path d="M7 7h.01"/></svg></div>
+    <div class="fab-act a2" onclick="fabNew3('account')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
+    <div class="fab-act a3" onclick="fabNew3('card')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg></div>
+    <div class="fab" id="fabBtn" title="新建" onclick="fabNew()"><svg id="fbSvg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <div class="home-bar"></div>
+
+  <!-- ===== 标签编辑页（新建 / 改名 / 选图标 / 删除） ===== -->
+  <div class="screen" id="tagEditor" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeTagEditor()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle" id="tagEditorTitle">新建标签</div>
+      <div class="act" onclick="saveTagEditor()">保存</div>
+    </div>
+    <div class="body">
+      <label class="elab">标签名称</label>
+      <input id="tagNameInput" class="einput" placeholder="例如：购物" maxlength="10">
+
+      <label class="elab">选择图标</label>
+      <div class="icon-grid" id="tagIconGrid"></div>
+
+      <label class="elab">选择颜色</label>
+      <div class="color-grid" id="tagColorGrid"></div>
+
+      <div id="tagDeleteWrap" style="display:none">
+        <div class="del-row" onclick="deleteTag()">删除这个标签</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 壁纸裁剪框（上传后调整位置/缩放） ===== -->
+  <div class="crop-overlay" id="cropOverlay">
+    <div class="crop-panel">
+      <div class="crop-head">调整壁纸</div>
+      <div class="crop-sub">拖动图片移动位置 · 双指/滚轮/滑杆缩放</div>
+      <div class="crop-stage" id="cropStage">
+        <img id="cropImg" alt="">
+        <div class="crop-frame"></div>
+      </div>
+      <div class="crop-zoom">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/></svg>
+        <input type="range" id="cropZoom" min="100" max="400" step="1" value="100" class="slider" oninput="zoomCrop(this.value)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+      </div>
+      <div class="crop-btns">
+        <div class="cbtn sec" onclick="closeCrop()">取消</div>
+        <div class="cbtn sec" onclick="resetCrop()">重置</div>
+        <div class="cbtn pri" onclick="applyCrop()">应用</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 锁屏（首次设置主密码 / 解锁 + 可选 Face ID） ===== -->
+  <div class="lock mode-unlock" id="lockScreen">
+    <div class="lock-bg"></div>
+    <div class="appicon"><img src="../assets/fallvault-logo.png" alt="FallVault"></div>
+    <h1>FallVault</h1>
+    <div class="sub" id="lockSub">输入主密码解锁</div>
+
+    <!-- 模式 A：首次设置主密码（打开软件第一步） -->
+    <div class="setupbox" id="setupBox">
+      <div class="pwwrap" id="pwWrapNew">
+        <input id="newPw" type="password" autocomplete="one-time-code" placeholder="设置主密码（至少 4 位）" spellcheck="false">
+      </div>
+      <div class="pwwrap" id="pwWrapConfirm">
+        <input id="newPw2" type="password" autocomplete="one-time-code" placeholder="再次输入确认" spellcheck="false">
+      </div>
+      <div class="lockmsg" id="setupMsg"></div>
+      <div class="unlock" onclick="doSetup()">设置并进入</div>
+      <!-- Face ID 不在首次设置里出现（用户要求）—— 一律去「设置 → Face ID 解锁」开启 -->
+      <div class="faceopt" style="display:none" aria-hidden="true">
+        <div class="fo-txt">
+          <span class="fo-label">Face ID 解锁</span>
+          <span class="fo-sub">可选 · 稍后能在设置里开启</span>
+        </div>
+        <button class="ios-switch" id="newFaceSw" type="button" onclick="toggleNewFace(this)" aria-label="Face ID 解锁"></button>
+      </div>
+    </div>
+
+    <!-- 模式 B：解锁（已有主密码） -->
+    <div class="unlockbox" id="unlockBox">
+      <div class="pwwrap" id="pwWrap">
+        <button class="pw-eye" id="pwEye" type="button" onclick="toggleLockPw()" title="显示 / 隐藏密码">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+        <input id="unlockPw" type="password" autocomplete="one-time-code" placeholder="输入主密码" spellcheck="false">
+        <svg class="ok-ic" viewBox="0 0 24 24" stroke-linecap="round"><path d="M5 12.8l4.3 4.2L19 7.6"/></svg>
+      </div>
+      <div class="lockmsg" id="lockMsg"></div>
+      <div class="unlock" onclick="unlockPw()">解锁</div>
+
+      <div class="faceid" id="faceBox">
+        <div class="fbtn" id="faceBtn" onclick="faceIdTry()">
+          <video id="faceVideo" class="face-cam" autoplay playsinline muted></video>
+          <svg class="ic-face" viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 10v1M15 10v1M9 16c1 .8 2.2 1.2 3 1.2s2-.4 3-1.2"/></svg>
+          <svg class="ic-check" viewBox="0 0 24 24"><path d="M5 12.8l4.3 4.2L19 7.6"/></svg>
+        </div>
+        <span id="faceLabel">Face ID 解锁</span>
+        <div class="face-actions" id="faceActions">
+          <button type="button" onclick="faceIdTry()">再试一次</button>
+          <button type="button" onclick="usePassword()">使用密码</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint" id="lockHint">演示 · 数据仅存本机</div>
+  </div>
+
+  <!-- ===== Face ID 录入（真实摄像头 + 人脸特征） ===== -->
+  <div class="facemodal" id="faceEnroll">
+    <div class="fm-box">
+      <div class="fm-title">录入 Face ID</div>
+      <div class="fm-sub" id="enrollSub">把脸放进取景框，保持光线充足</div>
+      <div class="cam-wrap">
+        <video id="enrollVideo" autoplay playsinline muted></video>
+        <div class="scan-corner tl"></div>
+        <div class="scan-corner tr"></div>
+        <div class="scan-corner bl"></div>
+        <div class="scan-corner br"></div>
+        <div class="scanbar"></div>
+      </div>
+      <div class="fm-status" id="enrollStatus">正在加载模型…</div>
+      <div class="fm-actions">
+        <button type="button" class="fm-btn primary" id="enrollAction" onclick="enrollAction()">开始录入</button>
+        <button type="button" class="fm-btn" onclick="cancelEnroll()">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 账号详情页 ===== -->
+  <div class="screen" id="detailScreen">
+    <div class="nav">
+      <div class="back" onclick="closeDetail()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle" id="detailTitle">账号</div>
+      <div class="act" id="detailEditBtn" style="display:flex;align-items:center;gap:4px" onclick="openEditor(currentIdx)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>编辑</div>
+    </div>
+    <div class="body" id="detailBody"></div>
+  </div>
+
+  <!-- ===== 新建/编辑页（对标 PC 端 EntryModal 全部字段） ===== -->
+  <div class="screen" id="editorScreen" style="z-index:56">
+    <div class="nav">
+      <div class="back" onclick="closeEditor()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle" id="editorTitle">新建账号</div>
+      <div class="act" onclick="saveEntry()">保存</div>
+    </div>
+    <div class="body">
+
+      <!-- ① 图标上传 + 标题 + 收藏 -->
+      <div class="ehd">
+        <button class="eico" id="eIconBtn" onclick="pickIcon()" title="上传自定义图标">
+          <img id="eIconImg" alt="" style="display:none">
+          <svg id="eIconPh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><line x1="16" x2="22" y1="5" y2="5"/><line x1="19" x2="19" y1="2" y2="8"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+          <input type="file" id="eIconFile" accept="image/*" style="display:none" onchange="onIconPicked(event)">
+        </button>
+        <div class="etwrap">
+          <label class="elab">标题 *</label>
+          <input id="fName" class="einput" placeholder="例如：Steam 账号">
+        </div>
+        <button class="efav" id="eFavBtn" onclick="toggleEditFav()" title="收藏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </button>
+      </div>
+      <div class="ehint2" id="eIconHint">点左侧方框上传自定义图标（留空则自动取网站图标）</div>
+
+      <!-- ② 账号 -->
+      <div class="ef">
+        <label class="elab">账号 / 用户名</label>
+        <input id="fUser" class="einput" placeholder="邮箱、手机号或用户名">
+      </div>
+
+      <!-- ③ 密码 + 生成 + 显隐 + 强度 -->
+      <div class="ef">
+        <label class="elab">密码</label>
+        <div class="epw">
+          <input id="fPass" class="einput" type="password" autocomplete="one-time-code" placeholder="输入或生成密码" oninput="updStrength()">
+          <button class="emini" onclick="openGen()" title="生成密码"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/></svg></button>
+          <button class="emini" id="eEyeBtn" onclick="toggleEditPass()" title="显示/隐藏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
+        <div class="estr" id="eStrWrap" style="display:none">
+          <div class="sbar"><i id="eStrBar"></i></div>
+          <span id="eStrLabel" class="eslabel"></span>
+        </div>
+      </div>
+
+      <!-- ④ 网站 + 获取图标 -->
+      <div class="ef">
+        <label class="elab">网站地址（可自动获取图标）</label>
+        <div class="esite">
+          <input id="fSite" class="einput" placeholder="example.com 或 https://...">
+          <button class="efetch" onclick="fetchFav()">获取图标</button>
+        </div>
+      </div>
+
+      <!-- ⑤ 分类（单选） -->
+      <div class="ef">
+        <label class="elab">所属分类</label>
+        <div class="epick" id="eCats"></div>
+      </div>
+
+      <!-- ⑥ 备注 -->
+      <div class="ef">
+        <label class="elab">备注</label>
+        <textarea id="fNote" class="etextarea" rows="3" placeholder="安全提问答案、备用邮箱等..."></textarea>
+      </div>
+
+      <!-- ⑨ 2FA 密钥 -->
+      <div class="ef">
+        <label class="elab">2FA 密钥（TOTP / otpauth:// / 迁移链接）</label>
+        <input id="fTotp" class="einput" placeholder="粘贴 TOTP 密钥或 otpauth:// URI" style="font-family:'SF Mono',ui-monospace,monospace;font-size:12.5px">
+        <div id="eTotpHint" class="ehint2" style="display:none;color:#30D158">保存后卡片上会实时显示 6 位验证码</div>
+      </div>
+
+      <!-- ⑩ 密码历史（编辑已有账号时） -->
+      <div class="ef" id="eHistWrap" style="display:none">
+        <label class="elab">密码历史</label>
+        <div id="eHist"></div>
+      </div>
+
+      <!-- 底部按钮 -->
+      <div class="egbtns">
+        <button class="egbtn cancel" onclick="closeEditor()">取消</button>
+        <button class="egbtn save" onclick="saveEntry()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 新建 / 编辑银行卡 ===== -->
+  <div class="screen" id="bankForm" style="z-index:58">
+    <div class="nav">
+      <div class="back" onclick="closeBankForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle" id="bankFormTitle">新建银行卡</div>
+      <div class="act" onclick="saveBankForm()">保存</div>
+    </div>
+    <div class="body">
+      <div class="ef">
+        <label class="elab">银行名称 *</label>
+        <input id="bfBank" class="einput" placeholder="例如：招商银行" oninput="bfPreview()">
+      </div>
+      <div class="ef">
+        <label class="elab">卡号</label>
+        <input id="bfNum" oninput="bfNumKey(event);bfPreview()" placeholder="6214 8300 0000 3885" class="einput" inputmode="numeric" autocomplete="one-time-code">
+      </div>
+      <div class="ef">
+        <label class="elab">持卡人（卡面拼音）</label>
+        <input id="bfHolder" class="einput" placeholder="ZHANG WEI" oninput="bfPreview()">
+      </div>
+      <div class="efrow2">
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">有效期</label>
+          <input id="bfExp" oninput="bfExpKey(event)" class="einput" placeholder="月/年（如 0931 → 09/31）" maxlength="5">
+        </div>
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">CVV</label>
+          <input id="bfCvv" class="einput" type="password" inputmode="numeric" autocomplete="one-time-code" placeholder="卡背面 3~4 位" maxlength="4">
+        </div>
+      </div>
+      <div class="ef">
+        <label class="elab">卡组织（选择或自定义）</label>
+        <div class="bf-orgrow">
+          <select id="bfOrgSel" class="einput" onchange="bfOrgChange()">
+            <option value="unionpay">银联 UnionPay</option>
+            <option value="visa">VISA</option>
+            <option value="mastercard">MasterCard 万事达</option>
+            <option value="jcb">JCB</option>
+            <option value="amex">American Express</option>
+            <option value="discover">Discover</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <input id="bfOrgCustom" class="einput" placeholder="输入卡组织名称（如：万事达借记）" style="display:none" oninput="bfPreview()">
+        </div>
+      </div>
+      <div class="ef">
+        <label class="elab">卡片类型（选择或自定义）</label>
+        <div class="bf-orgrow">
+          <select id="bfTypeSel" class="einput" onchange="bfTypeChange()">
+            <option value="储蓄卡">储蓄卡（借记）</option>
+            <option value="信用卡">信用卡</option>
+            <option value="借记卡">借记卡</option>
+            <option value="虚拟卡">虚拟卡</option>
+            <option value="贷记卡">贷记卡</option>
+            <option value="custom">自定义…</option>
+          </select>
+          <input id="bfTypeCustom" class="einput" placeholder="输入卡片类型（如：ETC 卡）" style="display:none" oninput="bfPreview()">
+        </div>
+      </div>
+      <div class="ef">
+        <label class="elab">卡面配色（渐变）</label>
+        <div class="bf-colors" id="bfColors"></div>
+      </div>
+      <div class="ef">
+        <label class="elab">卡面图片（不选则用配色）</label>
+        <button class="egbtn cancel" style="width:100%; margin:0;" onclick="document.getElementById('bfFaceFile').click()">🖼 从相册上传卡面图</button>
+        <input type="file" id="bfFaceFile" accept="image/*" style="display:none" onchange="onBfFacePicked(event)">
+      </div>
+      <div class="dsec" style="margin-top:16px;">账单地址（选填）</div>
+      <div class="ef">
+        <label class="elab">地址</label>
+        <input id="bfAddr" class="einput" placeholder="街道门牌（选填）">
+      </div>
+      <div class="efrow2">
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">城市</label>
+          <input id="bfCity" class="einput" placeholder="选填">
+        </div>
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">省 / 州</label>
+          <input id="bfState" class="einput" placeholder="选填">
+        </div>
+      </div>
+      <div class="efrow2">
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">国家 / 地区</label>
+          <input id="bfCountry" class="einput" placeholder="选填">
+        </div>
+        <div class="ef" style="flex:1; margin:0;">
+          <label class="elab">邮编</label>
+          <input id="bfZip" class="einput" placeholder="选填">
+        </div>
+      </div>
+      <div class="ef" style="margin-top:6px;">
+        <label class="elab">卡面预览</label>
+        <div class="bf-preview" id="bfPreview"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 免验证时长页 ===== -->
+  <!-- ===== 修改主密码 ===== -->
+  <div class="screen" id="screenChpw" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeChpw()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">修改主密码</div>
+    </div>
+    <div class="body">
+      <div class="dsec">修改后立即生效，下次解锁用新密码。Face ID 不受影响。</div>
+      <label class="elab">当前主密码</label>
+      <input id="chpwOld" class="einput" type="password" autocomplete="one-time-code" placeholder="输入当前主密码" spellcheck="false">
+      <label class="elab">新主密码（至少 4 位）</label>
+      <input id="chpwNew" class="einput" type="password" autocomplete="one-time-code" placeholder="输入新主密码" spellcheck="false">
+      <label class="elab">确认新主密码</label>
+      <input id="chpwNew2" class="einput" type="password" autocomplete="one-time-code" placeholder="再次输入新密码" spellcheck="false">
+      <div class="lockmsg" id="chpwMsg"></div>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="saveChpw()">保存新密码</div>
+    </div>
+  </div>
+
+  <!-- ===== 加密备份（导出 .fvault） ===== -->
+  <div class="screen" id="screenExport" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeExport()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">加密备份</div>
+    </div>
+    <div class="body">
+      <div class="dsec">把全部账号 + 验证码加密成一个 .fvault 文件（AES-256-GCM）。主密码不会写进文件，恢复时要单独输入这里设置的备份密码。</div>
+      <label class="elab">备份密码（至少 4 位）</label>
+      <input id="exportPw" class="einput" type="password" autocomplete="one-time-code" placeholder="设置备份密码" spellcheck="false">
+      <label class="elab">确认备份密码</label>
+      <input id="exportPw2" class="einput" type="password" autocomplete="one-time-code" placeholder="再次输入" spellcheck="false">
+      <div class="lockmsg" id="exportMsg"></div>
+      <div class="group" style="margin-top:10px">
+        <div class="drow"><span class="dk">账号</span><span class="dv" id="exportCount">—</span></div>
+        <div class="drow"><span class="dk">验证码</span><span class="dv" id="exportTotp">—</span></div>
+        <div class="drow"><span class="dk">加密方式</span><span class="dv" style="color:#30D158">AES-256-GCM</span></div>
+      </div>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="doExport()">导出 .fvault</div>
+    </div>
+  </div>
+
+  <!-- ===== 恢复备份 ===== -->
+  <div class="screen" id="screenRestore" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeRestore()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">恢复备份</div>
+    </div>
+    <div class="body">
+      <div class="dsec">选择一个 .fvault 备份文件并输入当时设置的备份密码。恢复会合并回当前保险库。</div>
+      <div class="group" style="margin-top:4px">
+        <div class="drow" onclick="pickRestoreFile()" style="cursor:pointer"><span class="dk">备份文件</span><span class="dv" id="restoreFile" style="color:#64D2FF">选择 .fvault</span></div>
+      </div>
+      <input type="file" id="restoreInput" accept=".fvault" style="display:none" onchange="onRestoreFile(this)">
+      <label class="elab">备份密码</label>
+      <input id="restorePw" class="einput" type="password" autocomplete="one-time-code" placeholder="输入备份密码" spellcheck="false">
+      <div class="lockmsg" id="restoreMsg"></div>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="doRestore()">恢复备份</div>
+    </div>
+  </div>
+
+  <!-- ===== TOTP 导出 / 导入 ===== -->
+  <div class="screen" id="screenTotpIO" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeTotpIO()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">TOTP 导出 / 导入</div>
+    </div>
+    <div class="body">
+      <div class="dsec">导出为 otpauth:// 链接（可导入其他验证器）；也可把别处的 otpauth 链接粘进来导入。</div>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="exportTotp()">导出全部链接</div>
+      <div class="group" id="totpExportList" style="margin-top:10px"></div>
+      <label class="elab" style="margin-top:16px">导入（每行一个 otpauth:// 链接）</label>
+      <textarea id="totpImportBox" class="einput" rows="4" placeholder="otpauth://totp/..." spellcheck="false"></textarea>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="importTotp()">导入</div>
+    </div>
+  </div>
+
+  <!-- ===== 更改壁纸 ===== -->
+  <div class="screen" id="screenWall" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeWall()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">更改壁纸</div>
+    </div>
+    <div class="body">
+      <div class="dsec">从相册选一张图片 → 弹出裁剪框，拖动调整位置、滑杆/滚轮缩放，点「应用」即可。</div>
+      <div class="del-row" style="background:rgba(100,210,255,.16);color:#64D2FF" onclick="pickWallFile()">从相册选择图片</div>
+      <input type="file" id="wallInput" accept="image/*" style="display:none" onchange="onWallFile(this)">
+      <div class="elab" style="margin-top:18px">内置壁纸</div>
+      <div class="wall-grid" id="wallGrid"></div>
+    </div>
+  </div>
+
+  <!-- ===== TOTP 时间偏移校正 ===== -->
+  <div class="screen" id="screenTotpOffset" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeTotpOffset()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">TOTP 时间偏移校正</div>
+    </div>
+    <div class="body">
+      <div class="dsec">验证码总是早/晚几秒失效，说明本机时间与服务器有偏差。点下面「自动校准」联网读取标准时间自动补偿；也可以手动微调（-30 ~ +30 秒）。设置会保存，重进软件仍生效。</div>
+      <div class="group" style="margin-top:4px">
+        <div class="drow"><span class="dk">当前偏移</span><span class="dv" id="totpOffsetVal" style="color:#64D2FF">0 秒</span></div>
+        <div class="drow"><span class="dk">上次校准</span><span class="dv" id="totpCalTime" style="color:rgba(255,255,255,.6);font-size:13px">—</span></div>
+      </div>
+      <div class="del-row" style="margin-top:10px;background:linear-gradient(135deg,rgba(100,210,255,.22),rgba(90,200,250,.14));color:#fff;border:0.5px solid rgba(100,210,255,.45)" onclick="autoCalibrateTime(false)">⚡ 自动校准（联网读取标准时间）</div>
+      <input type="range" id="totpOffsetRange" min="-30" max="30" step="1" value="0" class="slider" oninput="setTotpOffset(this.value)">
+      <div class="slider-marks"><span>-30s</span><span>0</span><span>+30s</span></div>
+      <div class="del-row" style="background:rgba(255,255,255,.1);color:#fff" onclick="resetTotpOffset()">重置为 0</div>
+    </div>
+  </div>
+
+  <div class="screen" id="screenGrace" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeGrace()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">免验证时长</div>
+    </div>
+    <div class="body">
+      <div class="dsec">关闭 / 最小化 App 后重新打开时，多长时间内无需再次输入主密码</div>
+      <div class="group" id="graceList"></div>
+    </div>
+  </div>
+
+  <!-- ===== GitHub 云备份页 ===== -->
+  <div class="screen" id="screenBackup" style="z-index:57">
+    <div class="nav">
+      <div class="back" onclick="closeBackup()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></div>
+      <div class="ntitle">GitHub 云备份</div>
+    </div>
+    <div class="body">
+      <label class="elab">已保存的令牌（选择后自动填入）</label>
+<div class="gs-box" id="gsBox" onclick="ghToggleTokenMenu()">
+        <span id="ghTokenSelLabel">（不选择，手动输入）</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="m6 9 6 6 6-6"/></svg>
+      </div>
+      <div class="gs-menu" id="ghTokenMenu" style="display:none"></div>
+      <label class="elab">访问令牌（Fine-grained PAT，Contents 读写权限）</label>
+      <input id="ghToken" class="einput" type="password" autocomplete="one-time-code" placeholder="github_pat_..." spellcheck="false">
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF;margin-top:8px" id="ghIdentifyBtn" onclick="ghIdentify()">识别令牌</div>
+      <div class="lockmsg" id="ghMsg"></div>
+      <div class="group" id="ghUserBox" style="display:none">
+        <div class="drow"><span class="dk">账号</span><span class="dv" id="ghUserName" style="color:#30D158">—</span></div>
+      </div>
+      <div id="ghRepoWrap" style="display:none">
+        <label class="elab">选择备份仓库（点击选中）</label>
+        <div class="group" id="ghRepoList" style="max-height:220px;overflow-y:auto"></div>
+        <div class="del-row" style="background:rgba(255,255,255,.08);color:#fff" onclick="ghCreateRepo()">＋ 新建私有仓库 fallvault-backup</div>
+        <div class="group" style="margin-top:10px">
+          <div class="drow"><span class="dk">已选仓库</span><span class="dv" id="ghRepoPicked" style="color:#64D2FF">未选择</span></div>
+        </div>
+      </div>
+      <div class="group" style="margin-top:10px">
+        <div class="drow"><span class="dk">上次备份</span><span class="dv" id="lastBackupInfo" style="color:rgba(255,255,255,.6)">尚未备份</span></div>
+        <div class="drow"><span class="dk">加密</span><span class="dv" style="color:#30D158">AES-256-GCM ✓</span></div>
+        <div class="drow"><span class="dk">令牌保存位置</span><span class="dv" style="color:rgba(255,255,255,.6)">本机钥匙串</span></div>
+      </div>
+      <div class="del-row" style="background:rgba(100,210,255,.14);color:#64D2FF" onclick="saveGhConfig()">保存配置</div>
+      <div class="del-row" style="background:rgba(100,210,255,.16);color:#64D2FF" onclick="doBackup()">立即备份到 GitHub</div>
+      <div class="del-row" style="background:rgba(255,255,255,.1);color:#fff" onclick="restoreFromGh()">从云端恢复</div>
+
+      <div class="elab" style="margin-top:20px">使用教程</div>
+      <div class="tut">
+        <div class="tut-step"><b>1</b><span>在 GitHub 新建一个 <b>私有仓库</b>（例如 <code>vault-backup</code>），留空初始化即可。</span></div>
+        <div class="tut-step"><b>2</b><span>生成令牌：GitHub → <b>Settings → Developer settings → Personal access tokens → Fine-grained tokens</b>，仓库范围只选上面那个私有仓库，权限只勾 <b>Contents: Read and write</b>。</span></div>
+        <div class="tut-step"><b>3</b><span>回到本页<b>粘贴令牌 → 点「识别令牌」</b>，App 会自动列出你的仓库，<b>点击选择</b>（没有可点「新建私有仓库」），再点「保存配置」（令牌只存本机，绝不上传）。</span></div>
+        <div class="tut-step"><b>4</b><span>点「<b>立即备份到 GitHub</b>」—— 数据在本地加密成 <code>.fvault</code> 后再上传，<b>主密码不会离开本机</b>。</span></div>
+        <div class="tut-step"><b>5</b><span>换手机或重装后：识别令牌 → 选同一个仓库 → 点「<b>从云端恢复</b>」，输入备份密码即可还原。</span></div>
+      </div>
+      <div class="dsec" style="margin-top:12px">⚠️ 只上传加密后的 .fvault；令牌泄露请立刻到 GitHub 撤销</div>
+    </div>
+  </div>
+
+  <!-- ===== 密码历史抽屉 ===== -->
+  <div class="gen-overlay" id="histSheet" onclick="if(event.target===this)closeHistory()">
+    <div class="gen">
+      <div class="gh"></div>
+      <div class="gcode" style="font-size:16px;color:#fff;text-shadow:none;padding-bottom:2px;letter-spacing:0">密码历史</div>
+      <div class="dsec" style="text-align:center;margin-bottom:8px">历史版本保留最近 5 条 · 点击右侧图标复制</div>
+      <div id="histList"></div>
+      <div class="gbtns">
+        <div class="gbtn sec" onclick="closeHistory()">关闭</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 密码生成器 ===== -->
+  <div class="gen-overlay" id="genOverlay" onclick="if(event.target===this)closeGen()">
+    <div class="gen">
+      <div class="gh"></div>
+      <div class="gcode" id="genCode">············</div>
+      <div class="gopt"><span class="gl">长度 <b id="genLen">16</b></span><input type="range" id="genRange" min="8" max="32" value="16" style="width:132px;accent-color:#64D2FF" oninput="document.getElementById('genLen').textContent=this.value;genRun()"></div>
+      <div class="gopt"><span class="gl">大写字母</span><div class="sw on" id="swUpper" onclick="this.classList.toggle('on');genRun()"></div></div>
+      <div class="gopt"><span class="gl">数字</span><div class="sw on" id="swNum" onclick="this.classList.toggle('on');genRun()"></div></div>
+      <div class="gopt"><span class="gl">符号</span><div class="sw" id="swSym" onclick="this.classList.toggle('on');genRun()"></div></div>
+      <div class="gbtns">
+        <div class="gbtn sec" onclick="genRun()">换一个</div>
+        <div class="gbtn pri" onclick="genUse()">使用此密码</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 居中搜索浮层 -->
+  <div class="search-overlay" id="searchOverlay" onclick="if(event.target===this)closeSearch()">
+    <form class="search-modal" onsubmit="doSearch(); return false;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input id="searchInput" placeholder="搜索账号、网站、标签…" autocomplete="off" spellcheck="false" enterkeyhint="search">
+      <div class="sbtn" onclick="doSearch()" title="搜索"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg></div>
+    </form>
+  </div>
+</div>
+
+<script src="vendor/face-api.js"></script>
+<script src="icons.js"></script>
+<script src="screens.js"></script>
+<script src="wall-inline.js"></script>
+<script src="extra.js"></script>
+</body>
+</html>
